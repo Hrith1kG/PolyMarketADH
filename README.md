@@ -1,75 +1,78 @@
-# Polymarket "Sureshot" Bot
+# Polymarket "Sureshot" Bot & Control Dashboard
 
 Scans active Polymarket markets for outcomes priced near-certain (default: 0.97-0.995),
-above liquidity/volume floors, and paper-trades them so you can measure hit-rate and P&L
-before ever risking real money.
+above liquidity/volume floors, focusing exclusively on **Sports Moneyline** matches, and paper-trades
+them with full risk controls.
+
+Includes a real-time **Streamlit Control Panel** as the primary interface for live monitoring and runtime adjustments.
+
+Powered by the official unified **`polymarket-client`** Python SDK.
 
 **This is not financial advice, and a 0.97 price is not a guarantee.** Markets do flip
 on late news, oracle disputes, or thin-book manipulation. Treat this as a starting point
 to backtest/paper-trade your own risk tolerance, not a money machine.
 
-## How it decides a "sureshot"
+---
 
-An outcome is a candidate when, on the latest scan:
-- Gamma-reported price is between `PRICE_MIN` and `PRICE_MAX` (default 0.97-0.995)
-- Market volume >= `MIN_VOLUME` and liquidity >= `MIN_LIQUIDITY` (filters out thin books
-  where one small trade can fake a near-1.0 price)
-- Time to resolution is between `MIN_HOURS_TO_RESOLUTION` and `MAX_DAYS_TO_RESOLUTION`
-- The price is then re-confirmed against the live CLOB order book (`clob_client.get_price`)
-  before a paper trade is opened, since Gamma's cached price can lag the real book
+## Features
 
-All thresholds live in `.env` (copy `.env.example` -> `.env`) or `config.py`.
+- **Sports & Moneyline Exclusivity**: Scans Polymarket's master sports tag (`tag_id=100639`) and filters for match winner lines (`sports_market_types=["moneyline"]`).
+- **Streamlit Control Panel (`dashboard.py`)**:
+  - **Execution Pipeline**: Order lifecycle metrics (intentions, filled, rejected), and tracked positions table with `Mode` tag (`PAPER` / `LIVE`).
+  - **Operations & Health**: Lifecycle state cards and Circuit Breakers & Gates enforcement table.
+  - **Live Control**: Seamless zero-restart Paper $\leftrightarrow$ Live execution switching, Entry Kill Switch, and real-time live account vitals (wallet, type, on-chain USDC.e collateral balance, open CLOB orders).
+  - **Market Signals & Manual Trigger**: Real-time sports moneyline opportunities feed with 1-click manual execution.
+  - **Trade History & Performance**: Settled trades log, win-rate tracking, realized P&L, and safety portfolio reset controls.
+- **Risk Management**: Enforces max trades per day, max open positions, max exposure, slippage limits, and emergency kill-switches.
+- **CLOB Verification**: Re-confirms Gamma-reported prices against the live CLOB order book before entering trades.
+
+---
 
 ## Setup
 
+The unified SDK requires **Python >= 3.11**. We recommend using `uv` or Python 3.12:
+
 ```bash
-python -m venv venv
-venv\Scripts\activate      # on Windows
+# Using uv (recommended):
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# Or using standard python (Python 3.11+):
+python3 -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-copy .env.example .env
-python main.py
+
+cp .env.example .env
 ```
 
-No wallet, private key, or API key is needed for paper trading -- market data and
-order-book prices are public endpoints.
+---
 
-## What it does each cycle
+## How to Run
 
-1. Checks open paper positions against Gamma to see if their market has closed/resolved,
-   and books realized P&L.
-2. Scans all active markets for new candidates, skipping any market it's already holding.
-3. Opens a simulated position sized at `STAKE_PER_TRADE`, respecting `MAX_OPEN_POSITIONS`
-   and `MAX_TOTAL_EXPOSURE`.
-4. Prints a running balance/exposure/W-L summary and sleeps `POLL_INTERVAL_SECONDS`.
+### 1. Launch the Control Panel Dashboard
+Open the primary UI to view signals, monitor positions, and adjust thresholds:
+```bash
+streamlit run dashboard.py
+```
+This opens the web interface in your browser at `http://localhost:8501`.
 
-State (balance, open positions, closed trade log) persists to `state.json` between runs.
-Delete it to reset.
+### 2. Run the Automated Trading Bot
+In a separate terminal tab (with `.venv` activated):
+```bash
+python main.py
+```
+The bot executes automated scan and settlement loops, applying the threshold settings configured in the dashboard in real time.
 
-## Going live
-
-`live_broker.py` wraps Polymarket's official `py-clob-client` to place real GTC limit
-orders. It is deliberately **not** wired into `main.py` by default. Before touching it:
-
-1. Paper-trade for long enough (weeks, many resolved markets) to trust the hit-rate and
-   that fees/slippage don't eat the edge.
-2. Understand you need a Polygon wallet funded with USDC.e, and that `PRIVATE_KEY` in
-   `.env` is your wallet's private key -- treat that file as a secret, never commit it,
-   and prefer a wallet holding only what you're willing to risk in this bot.
-3. `pip install -r requirements-live.txt`
-4. Set `LIVE_TRADING=true`, `PRIVATE_KEY`, and `FUNDER_ADDRESS` in `.env`.
-5. Run `python main.py` -- it will print your configured risk caps and require you to
-   type `I UNDERSTAND THE RISK` before placing a single live order.
-
-Even then, keep `STAKE_PER_TRADE` and `MAX_TOTAL_EXPOSURE` small until you've watched it
-run live for a while. Nothing here protects you from a market resolving against a 0.99
-price -- it happens.
+---
 
 ## Files
 
-- `config.py` -- all tunables, loaded from `.env`
-- `gamma_client.py` -- public market listing/metadata (Gamma API)
-- `clob_client.py` -- public order-book price lookups (CLOB API)
-- `scanner.py` -- the "sureshot" filter, returns `Opportunity` objects
-- `paper_broker.py` -- simulated portfolio, persisted to `state.json`
-- `live_broker.py` -- real order placement via `py-clob-client` (opt-in, see above)
-- `main.py` -- the scan/trade/settle loop
+- `dashboard.py` -- Streamlit web control panel and real-time monitor
+- `settings_manager.py` -- dynamic runtime settings provider (`settings.json`)
+- `scanner.py` -- the sports moneyline filter, returns `Opportunity` objects
+- `paper_broker.py` -- simulated portfolio, daily limits, persisted to `state.json`
+- `live_broker.py` -- real order placement via `SecureClient` (opt-in)
+- `polymarket_client.py` -- unified `PublicClient` and `SecureClient` provider
+- `config.py` -- baseline configurations loaded from `.env`
+- `main.py` -- the automated scan/trade/settle loop

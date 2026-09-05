@@ -30,8 +30,8 @@ PRICE_MAX = _float("PRICE_MAX", 0.995)
 MIN_VOLUME = _float("MIN_VOLUME", 5000)
 MIN_LIQUIDITY = _float("MIN_LIQUIDITY", 1000)
 
-# Skip markets resolving too soon (higher chance of a last-second flip/dispute you can't react to)
-# or too far out (capital sits idle / more time for something to change).
+# Skip markets resolving too soon (higher chance of a last-second flip/dispute)
+# or too far out (capital sits idle / more time for conditions to change).
 MIN_HOURS_TO_RESOLUTION = _float("MIN_HOURS_TO_RESOLUTION", 1)
 MAX_DAYS_TO_RESOLUTION = _float("MAX_DAYS_TO_RESOLUTION", 30)
 
@@ -41,18 +41,14 @@ MAX_OPEN_POSITIONS = _int("MAX_OPEN_POSITIONS", 10)
 MAX_TOTAL_EXPOSURE = _float("MAX_TOTAL_EXPOSURE", 200)
 STARTING_BALANCE = _float("STARTING_BALANCE", 1000)
 
-# --- Loop / API ---
+# --- Loop / Timing ---
 POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL_SECONDS", 60)
-GAMMA_BASE_URL = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
-CLOB_BASE_URL = os.getenv("CLOB_BASE_URL", "https://clob.polymarket.com")
 
 # --- Execution mode ---
-# Paper trading (default) never touches real funds or a wallet. Only flip this once you have
-# read README.md's "Going live" section and understand the risks.
 LIVE_TRADING = _bool("LIVE_TRADING", False)
-PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
-FUNDER_ADDRESS = os.getenv("FUNDER_ADDRESS", "")
-SIGNATURE_TYPE = _int("SIGNATURE_TYPE", 1)  # 0=EOA, 1=Email/Magic, 2=Proxy/Gnosis Safe
-CHAIN_ID = _int("CHAIN_ID", 137)  # Polygon mainnet
+PRIVATE_KEY = os.getenv("PRIVATE_KEY") or os.getenv("POLYMARKET_PRIVATE_KEY", "")
+FUNDER_ADDRESS = os.getenv("FUNDER_ADDRESS") or os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
+RELAYER_API_KEY = os.getenv("RELAYER_API_KEY") or os.getenv("POLYMARKET_RELAYER_API_KEY", "")
+RELAYER_API_KEY_ADDRESS = os.getenv("RELAYER_API_KEY_ADDRESS") or os.getenv("POLYMARKET_RELAYER_API_KEY_ADDRESS", "")
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")

@@ -1,5 +1,11 @@
 .env
+.env.*
+!.env.example
 venv/
+.venv/
 __pycache__/
 *.pyc
 state.json
+settings.json
+.DS_Store
+.agents/
