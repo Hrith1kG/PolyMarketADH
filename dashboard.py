@@ -9,6 +9,9 @@ import pandas as pd
 import streamlit as st
 
 import config
+import importlib
+import paper_broker
+importlib.reload(paper_broker)
 from paper_broker import PaperBroker
 import live_broker
 import scanner
@@ -750,7 +753,13 @@ with tab_signals:
                         st.error("Live broker not ready. Check credentials.")
                         st.stop()
 
-                pos, reason = broker.open_position(obj, stake=manual_stake, mode=execution_mode_str)
+                try:
+                    pos, reason = broker.open_position(obj, stake=manual_stake, mode=execution_mode_str)
+                except TypeError:
+                    pos, reason = broker.open_position(obj, stake=manual_stake)
+                    if pos:
+                        pos["mode"] = execution_mode_str
+
                 if pos:
                     st.success(f"Successfully opened position on {obj.question[:40]} with ${manual_stake} stake!")
                     st.rerun()

@@ -115,7 +115,7 @@ class PaperBroker:
         lc["rejected"] = lc.get("rejected", 0) + 1
         self.save()
 
-    def open_position(self, opp, stake: Optional[float] = None, mode: str = "PAPER") -> Tuple[Optional[Dict[str, Any]], str]:
+    def open_position(self, opp, stake: Optional[float] = None, mode: str = "PAPER", **kwargs) -> Tuple[Optional[Dict[str, Any]], str]:
         settings = settings_manager.load_settings()
         stake = stake if stake is not None else settings.get("stake_per_trade", 25.0)
 
