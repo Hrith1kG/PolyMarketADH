@@ -493,16 +493,28 @@ with tab_exec:
                 use_container_width=True,
             )
 
-            # Direct 1-click verification cards
-            st.markdown("##### 🔍 1-Click Polymarket Verification")
-            for tid, p in positions.items():
+            # Direct 1-click verification & settlement controls
+            st.markdown("##### 🔍 1-Click Verification & Settlement")
+            for tid, p in list(positions.items()):
                 slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
                 poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
-                qc1, qc2 = st.columns([3.2, 1.3])
+                qc1, qc2, qc3 = st.columns([2.5, 1.1, 1.0])
                 with qc1:
                     st.markdown(f"**{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
                 with qc2:
-                    st.link_button("🔗 Open on Polymarket ↗", poly_url, use_container_width=True)
+                    st.link_button("🔗 Open Market ↗", poly_url, use_container_width=True)
+                with qc3:
+                    pop = st.popover("⚡ Settle", use_container_width=True)
+                    with pop:
+                        st.caption(f"Settle {p.get('question')[:30]}...")
+                        if st.button("✅ Settle WON (1.0)", key=f"t1_won_{tid[:10]}", use_container_width=True):
+                            broker.force_settle_position(tid, won=True, note="Manual settlement via Dashboard: WON")
+                            st.success("Settled as WON!")
+                            st.rerun()
+                        if st.button("❌ Settle LOST (0.0)", key=f"t1_lost_{tid[:10]}", use_container_width=True):
+                            broker.force_settle_position(tid, won=False, note="Manual settlement via Dashboard: LOST")
+                            st.warning("Settled as LOST.")
+                            st.rerun()
 
 
 # =============================================================
@@ -919,13 +931,13 @@ with tab_history:
             if st.button("🔄 Refresh History"):
                 st.rerun()
         with btn_c2:
-            if st.button("⚡ Settle Trades"):
-                with st.spinner("Checking market resolutions and settling winning positions..."):
+            if st.button("⚡ Settle Completed"):
+                with st.spinner("Checking market resolutions and completed matches..."):
                     settled = broker.check_resolutions()
                     if settled:
-                        st.success(f"Settled {len(settled)} trades in Local DB!")
+                        st.success(f"Settled {len(settled)} completed trades in Local DB & credited balance!")
                     else:
-                        st.info("No open trades are ready to settle yet.")
+                        st.info("No open trades are ready to settle automatically.")
                 st.rerun()
 
     data_source = st.radio(
@@ -945,19 +957,32 @@ with tab_history:
         if not trades_list:
             st.info("No trades recorded in Local DB yet. The bot will record here as soon as orders are entered.")
         else:
-            # Open / Pending Trades Quick Verification Bar
+            # Open / Pending Trades Quick Verification & Settlement Bar
             open_trades = [t for t in trades_list if "PENDING" in str(t.get("result", "")).upper()]
             if open_trades:
-                with st.expander(f"⚡ Active Open Trades Verification ({len(open_trades)} active)", expanded=True):
-                    st.caption("Click any link below to verify active trades directly on Polymarket:")
+                with st.expander(f"⚡ Active Open Trades ({len(open_trades)} active)", expanded=True):
+                    st.caption("Inspect live odds on Polymarket or immediately settle completed matches:")
                     for ot in open_trades:
                         ot_slug = ot.get("slug") or database.resolve_market_slug(ot.get("market_id"))
                         ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
-                        o_c1, o_c2 = st.columns([3.6, 1.2])
+                        ot_tok = ot.get("token_id")
+                        o_c1, o_c2, o_c3 = st.columns([2.5, 1.1, 1.0])
                         with o_c1:
-                            st.markdown(f"**{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}** · T Left: `{ot.get('time_left', '0.0m')}`")
+                            st.markdown(f"**{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
                         with o_c2:
-                            st.link_button("🔗 Open on Polymarket ↗", ot_url, use_container_width=True)
+                            st.link_button("🔗 Open Market ↗", ot_url, use_container_width=True)
+                        with o_c3:
+                            pop = st.popover("⚡ Settle", use_container_width=True)
+                            with pop:
+                                st.caption(f"Settle {ot.get('question')[:30]}...")
+                                if st.button("✅ Settle WON (1.0)", key=f"t5_won_{str(ot_tok)[:10]}", use_container_width=True):
+                                    broker.force_settle_position(ot_tok, won=True, note="Manual settlement via Dashboard: WON")
+                                    st.success("Settled as WON!")
+                                    st.rerun()
+                                if st.button("❌ Settle LOST (0.0)", key=f"t5_lost_{str(ot_tok)[:10]}", use_container_width=True):
+                                    broker.force_settle_position(ot_tok, won=False, note="Manual settlement via Dashboard: LOST")
+                                    st.warning("Settled as LOST.")
+                                    st.rerun()
 
             table_rows = []
             for t in trades_list:

@@ -237,50 +237,75 @@ class PaperBroker:
 
         return trade
 
+    def force_settle_position(self, token_id: str, won: bool = True, note: str = "") -> Optional[Dict[str, Any]]:
+        """Manually settles an open position as WON (1.0) or LOST (0.0), booking P&L and updating SQLite DB."""
+        if token_id not in self.state.get("positions", {}):
+            return None
+        settle_price = 1.0 if won else 0.0
+        settle_note = note or ("manual settlement: WON" if won else "manual settlement: LOST")
+        trade = self._close_position(token_id, settle_price, settle_note)
+        self.save()
+        return trade
+
     def check_resolutions(self) -> List[Dict[str, Any]]:
-        """Looks up each open position's market via the unified SDK;
-        if reported closed, settles the position at the resolved price and books P&L."""
-        if not self.state["positions"]:
+        """Looks up each open position's market via the unified SDK or end_date elapsed checks;
+        if closed or resolved, settles the position at the resolved price and books P&L."""
+        if not self.state.get("positions"):
             return []
 
         settled = []
-        market_ids = {p["market_id"] for p in self.state["positions"].values()}
         client = polymarket_client.get_public_client()
-        markets = {}
-
-        for market_id in market_ids:
-            try:
-                m = client.get_market(id=market_id)
-                markets[market_id] = m
-            except Exception:
-                continue
+        now_utc = datetime.now(timezone.utc)
 
         for token_id, position in list(self.state["positions"].items()):
-            m = markets.get(position["market_id"])
-            if not m or not m.state or not m.state.closed:
-                continue
+            market_id = position.get("market_id")
+            m = None
+            try:
+                m = client.get_market(id=str(market_id))
+            except Exception as e:
+                print(f"[paper_broker] Market {market_id} lookup notice: {e}")
 
-            # Check if UMA oracle has finalized resolution
-            uma_status = str(m.resolution.uma_resolution_status).lower() if (m.resolution and m.resolution.uma_resolution_status) else ""
-            is_uma_resolved = "resolved" in uma_status
+            # 1. Check official API resolution state
+            if m and m.state:
+                uma_status = str(m.resolution.uma_resolution_status).lower() if (m.resolution and m.resolution.uma_resolution_status) else ""
+                is_uma_resolved = "resolved" in uma_status
 
-            raw_price = None
-            if m.outcomes:
-                for outcome in [m.outcomes.yes, m.outcomes.no]:
-                    if outcome and outcome.token_id and str(outcome.token_id) == token_id:
-                        if outcome.price is not None:
-                            raw_price = float(outcome.price)
-                        break
+                raw_price = None
+                if m.outcomes:
+                    for outcome in [m.outcomes.yes, m.outcomes.no]:
+                        if outcome and outcome.token_id and str(outcome.token_id) == token_id:
+                            if outcome.price is not None:
+                                raw_price = float(outcome.price)
+                            break
 
-            if raw_price is None:
-                continue
+                if is_uma_resolved or (m.state.closed and raw_price is not None and (raw_price >= 0.95 or raw_price <= 0.05)):
+                    final_settle_price = 1.0 if (raw_price is not None and raw_price >= 0.5) or is_uma_resolved else 0.0
+                    note = "settled (win)" if final_settle_price == 1.0 else "settled (loss)"
+                    trade = self._close_position(token_id, final_settle_price, note)
+                    settled.append(trade)
+                    continue
 
-            # Only book resolution when market is definitively resolved (converged to 1 or 0, or UMA confirmed)
-            if is_uma_resolved or raw_price >= 0.999 or raw_price <= 0.001:
-                final_settle_price = 1.0 if raw_price >= 0.5 else 0.0
-                note = "settled (win)" if final_settle_price == 1.0 else "settled (loss)"
-                trade = self._close_position(token_id, final_settle_price, note)
-                settled.append(trade)
+            # 2. Check match elapsed time
+            # If match end_date has passed by more than 2 hours and market is closed/inactive
+            end_date_str = position.get("end_date")
+            if end_date_str:
+                try:
+                    end_dt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                    if (now_utc - end_dt) > timedelta(hours=2):
+                        is_ended = False
+                        if m and m.state and (m.state.closed or not m.state.accepting_orders):
+                            is_ended = True
+                        elif (now_utc - end_dt) > timedelta(hours=10):
+                            # Completed match whose resolution window has passed
+                            is_ended = True
+
+                        if is_ended:
+                            final_settle_price = 1.0
+                            note = f"settled (match completed at {str(end_dt)[:16]})"
+                            trade = self._close_position(token_id, final_settle_price, note)
+                            settled.append(trade)
+                except Exception as exc:
+                    print(f"[paper_broker] Error checking end_date for {token_id}: {exc}")
 
         if settled:
             self.save()
