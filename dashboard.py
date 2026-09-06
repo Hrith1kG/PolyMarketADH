@@ -106,7 +106,11 @@ def fetch_on_chain_wallet_data(address: str):
         for t in trades_paginator:
             p_val = float(t.price) if t.price is not None else 0.0
             s_val = float(t.size) if t.size is not None else 0.0
+            t_slug = getattr(t, "slug", "") or ""
+            t_eslug = getattr(t, "event_slug", "") or ""
+            t_url = f"https://polymarket.com/market/{t_slug}" if t_slug else (f"https://polymarket.com/event/{t_eslug}" if t_eslug else "https://polymarket.com")
             trades.append({
+                "Polymarket": t_url,
                 "Timestamp": str(t.timestamp)[:19].replace("T", " ") if t.timestamp else "",
                 "Market / Question": str(t.title or "")[:50],
                 "Outcome": str(t.outcome or ""),
@@ -125,7 +129,11 @@ def fetch_on_chain_wallet_data(address: str):
             avg_p = float(p.avg_price) if p.avg_price is not None else 0.0
             sz = float(p.size) if p.size is not None else 0.0
             c_pnl = float(p.cash_pnl) if p.cash_pnl is not None else 0.0
+            p_slug = getattr(p, "slug", "") or ""
+            p_eslug = getattr(p, "event_slug", "") or ""
+            p_url = f"https://polymarket.com/market/{p_slug}" if p_slug else (f"https://polymarket.com/event/{p_eslug}" if p_eslug else "https://polymarket.com")
             positions.append({
+                "Polymarket": p_url,
                 "Market / Question": str(p.title or "")[:50],
                 "Outcome": str(p.outcome or ""),
                 "Tokens": round(sz, 4),
@@ -145,7 +153,11 @@ def fetch_on_chain_wallet_data(address: str):
             avg_p = float(cp.avg_price) if cp.avg_price is not None else 0.0
             cur_p = float(cp.cur_price) if cp.cur_price is not None else 0.0
             pnl_v = float(cp.realized_pnl) if cp.realized_pnl is not None else 0.0
+            cp_slug = getattr(cp, "slug", "") or ""
+            cp_eslug = getattr(cp, "event_slug", "") or ""
+            cp_url = f"https://polymarket.com/market/{cp_slug}" if cp_slug else (f"https://polymarket.com/event/{cp_eslug}" if cp_eslug else "https://polymarket.com")
             closed_pos.append({
+                "Polymarket": cp_url,
                 "Market / Question": str(cp.title or "")[:50],
                 "Outcome": str(cp.outcome or ""),
                 "Avg Entry": f"{avg_p * 100:.2f}%" if avg_p < 1.0 else f"${avg_p:.2f}",
@@ -454,17 +466,43 @@ with tab_exec:
                 mode = p.get("mode", execution_mode_str)
                 event_id = str(p.get("event_id") or p.get("market_id") or tid)[:12] + "..."
                 token_short = str(tid)[:8] + "..."
+                slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
+                poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
                 df_pos.append({
+                    "Verify Trade": poly_url,
                     "Mode": mode,
+                    "Question": p.get("question", "")[:50],
+                    "Outcome": p.get("outcome_label", ""),
+                    "Avg Entry": f"${p.get('entry_price', 0):.4f}",
+                    "Quantity": f"{p.get('shares', 0):.2f}",
+                    "Capital": f"${p.get('stake', 0):.2f}",
+                    "Time Left": p.get("time_left", "0.0m"),
                     "Event ID": event_id,
                     "Token": token_short,
-                    "Side": "BUY",
-                    "Quantity": f"{p.get('shares', 0):.2f}",
-                    "Avg Entry": f"${p.get('entry_price', 0):.4f}",
-                    "Capital": f"${p.get('stake', 0):.2f}",
-                    "Question": p.get("question", "")[:45],
                 })
-            st.dataframe(pd.DataFrame(df_pos))
+            st.dataframe(
+                pd.DataFrame(df_pos),
+                column_config={
+                    "Verify Trade": st.column_config.LinkColumn(
+                        "Verify Trade",
+                        display_text="🔗 View on Polymarket ↗",
+                        help="Click to open and verify this market directly on Polymarket",
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            # Direct 1-click verification cards
+            st.markdown("##### 🔍 1-Click Polymarket Verification")
+            for tid, p in positions.items():
+                slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
+                poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
+                qc1, qc2 = st.columns([3.2, 1.3])
+                with qc1:
+                    st.markdown(f"**{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
+                with qc2:
+                    st.link_button("🔗 Open on Polymarket ↗", poly_url, use_container_width=True)
 
 
 # =============================================================
@@ -780,7 +818,10 @@ with tab_signals:
         st.caption(f"Showing {len(signals)} top qualifying match(es) from recent scan.")
         df_signals = []
         for s in signals:
+            slug = s.get("slug", "") or database.resolve_market_slug(s.get("market_id"))
+            poly_url = database.get_polymarket_url(slug, s.get("market_id"))
             df_signals.append({
+                "Polymarket": poly_url,
                 "Match / Game": s.get("question"),
                 "Outcome": s.get("outcome_label"),
                 "Confirmed Price": f"${s.get('confirmed_price', 0):.3f}",
@@ -791,13 +832,29 @@ with tab_signals:
                 "End Date": s.get("end_date", "N/A"),
                 "Token ID": s.get("token_id"),
             })
-        st.dataframe(pd.DataFrame(df_signals))
+        st.dataframe(
+            pd.DataFrame(df_signals),
+            column_config={
+                "Polymarket": st.column_config.LinkColumn(
+                    "Polymarket",
+                    display_text="🔗 View Market ↗",
+                    help="Click to inspect this market on Polymarket",
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
 
         # Manual Trade Executor
         st.markdown("### Manual Trade Trigger")
         st.write(f"Execute a trade in **{execution_mode_str}** mode on one of the signals:")
         signal_options = {f"{s['question'][:60]} ({s['outcome_label']} @ {s['confirmed_price']:.3f})": s for s in signals}
         selected_signal_name = st.selectbox("Select Signal to Trade", list(signal_options.keys()))
+
+        selected_sig = signal_options[selected_signal_name]
+        sel_slug = selected_sig.get("slug") or database.resolve_market_slug(selected_sig.get("market_id"))
+        sel_url = database.get_polymarket_url(sel_slug, selected_sig.get("market_id"))
+        st.link_button(f"🔗 Inspect '{selected_sig.get('question')[:45]}...' on Polymarket ↗", sel_url)
 
         col_stake, col_btn = st.columns([2, 1])
         with col_stake:
@@ -888,6 +945,20 @@ with tab_history:
         if not trades_list:
             st.info("No trades recorded in Local DB yet. The bot will record here as soon as orders are entered.")
         else:
+            # Open / Pending Trades Quick Verification Bar
+            open_trades = [t for t in trades_list if "PENDING" in str(t.get("result", "")).upper()]
+            if open_trades:
+                with st.expander(f"⚡ Active Open Trades Verification ({len(open_trades)} active)", expanded=True):
+                    st.caption("Click any link below to verify active trades directly on Polymarket:")
+                    for ot in open_trades:
+                        ot_slug = ot.get("slug") or database.resolve_market_slug(ot.get("market_id"))
+                        ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
+                        o_c1, o_c2 = st.columns([3.6, 1.2])
+                        with o_c1:
+                            st.markdown(f"**{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}** · T Left: `{ot.get('time_left', '0.0m')}`")
+                        with o_c2:
+                            st.link_button("🔗 Open on Polymarket ↗", ot_url, use_container_width=True)
+
             table_rows = []
             for t in trades_list:
                 res = str(t.get("result", "PENDING")).upper()
@@ -907,7 +978,11 @@ with tab_history:
                 raw_tid = str(t.get("trade_id", ""))
                 tid_disp = raw_tid if len(raw_tid) <= 14 else raw_tid[:14] + "..."
 
+                slug_val = t.get("slug") or database.resolve_market_slug(t.get("market_id"))
+                poly_url = database.get_polymarket_url(slug_val, t.get("market_id"))
+
                 table_rows.append({
+                    "Polymarket": poly_url,
                     "Trade ID": tid_disp,
                     "Placed At": str(t.get("placed_at", ""))[:19].replace("T", " "),
                     "Question": str(t.get("question", "")),
@@ -920,7 +995,18 @@ with tab_history:
                     "P&L $": pnl_disp,
                     "Broker": str(t.get("broker", "paper")).lower(),
                 })
-            st.dataframe(pd.DataFrame(table_rows))
+            st.dataframe(
+                pd.DataFrame(table_rows),
+                column_config={
+                    "Polymarket": st.column_config.LinkColumn(
+                        "Polymarket",
+                        display_text="🔗 View Market ↗",
+                        help="Click to open and verify this market directly on Polymarket",
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
 
     else:
         # Live On-Chain Activity (Data API)
@@ -965,21 +1051,54 @@ with tab_history:
                 if not oc_positions:
                     st.info(f"No active positions found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_positions))
+                    st.dataframe(
+                        pd.DataFrame(oc_positions),
+                        column_config={
+                            "Polymarket": st.column_config.LinkColumn(
+                                "Polymarket",
+                                display_text="🔗 Verify On-Chain ↗",
+                                help="Click to open this market on Polymarket",
+                            ),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
             with oc_t2:
                 st.markdown("#### Live Filled Orders & Trades Log")
                 if not oc_trades:
                     st.info(f"No recent filled trades found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_trades))
+                    st.dataframe(
+                        pd.DataFrame(oc_trades),
+                        column_config={
+                            "Polymarket": st.column_config.LinkColumn(
+                                "Polymarket",
+                                display_text="🔗 View Market ↗",
+                                help="Click to open this market on Polymarket",
+                            ),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
             with oc_t3:
                 st.markdown("#### Resolved Positions & Realized P&L")
                 if not oc_closed:
                     st.info(f"No historical settled positions found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_closed))
+                    st.dataframe(
+                        pd.DataFrame(oc_closed),
+                        column_config={
+                            "Polymarket": st.column_config.LinkColumn(
+                                "Polymarket",
+                                display_text="🔗 View Market ↗",
+                                help="Click to open this market on Polymarket",
+                            ),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
 
 # =============================================================

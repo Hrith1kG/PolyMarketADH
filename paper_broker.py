@@ -145,11 +145,13 @@ class PaperBroker:
             except Exception:
                 time_left_str = "0.0m"
 
+        slug_val = getattr(opp, "slug", "") or database.resolve_market_slug(opp.market_id)
         position = {
             "trade_id": trade_id,
             "mode": mode.upper(),
             "token_id": opp.token_id,
             "market_id": opp.market_id,
+            "slug": slug_val,
             "event_id": getattr(opp, "event_id", "") or str(opp.market_id)[:12],
             "question": opp.question,
             "outcome_label": opp.outcome_label,
@@ -173,6 +175,7 @@ class PaperBroker:
             "placed_at": position["opened_at"],
             "market_id": position["market_id"],
             "token_id": position["token_id"],
+            "slug": slug_val,
             "question": position["question"],
             "outcome": position["outcome_label"],
             "entry_price": position["entry_price"],

@@ -8,6 +8,53 @@ from typing import List, Dict, Any, Optional
 DB_FILE = os.getenv("TRADES_DB_FILE", "trades.db")
 
 
+_SLUG_CACHE: Dict[str, str] = {
+    "3856086": "bra2-pop-ber-2026-09-06-pop",
+    "3889501": "cfb-boise-ore-2026-09-05",
+    "3799418": "ukr1-met-obo-2026-09-05-obo",
+    "3832912": "lal-val-bar-2026-09-06-val",
+    "3889513": "cfb-marsh-pennst-2026-09-05",
+    "3792005": "bun-s04-bay-2026-09-05-s04",
+    "3792014": "epl-mac-cov-2026-09-05-cov",
+    "3889428": "cfb-ecar-ala-2026-09-05",
+    "3889431": "cfb-ntx-ind-2026-09-05",
+    "3889700": "cfb-msvlst-sacst-2026-09-05",
+}
+
+
+def resolve_market_slug(market_id: Optional[str] = None) -> str:
+    """Resolves the Polymarket URL slug for a given market ID using cache or API lookup."""
+    if not market_id:
+        return ""
+    mid_str = str(market_id)
+    if mid_str in _SLUG_CACHE:
+        return _SLUG_CACHE[mid_str]
+    try:
+        import polymarket_client
+        client = polymarket_client.get_public_client()
+        m = client.get_market(id=mid_str)
+        if m and getattr(m, "slug", None):
+            _SLUG_CACHE[mid_str] = m.slug
+            return m.slug
+    except Exception:
+        pass
+    return ""
+
+
+def get_polymarket_url(slug: Optional[str] = None, market_id: Optional[str] = None) -> str:
+    """Generates the direct, verified Polymarket URL for a market or trade."""
+    s = (slug or "").strip()
+    if s:
+        if s.startswith("http://") or s.startswith("https://"):
+            return s
+        return f"https://polymarket.com/market/{s}"
+    if market_id:
+        resolved = resolve_market_slug(market_id)
+        if resolved:
+            return f"https://polymarket.com/market/{resolved}"
+    return "https://polymarket.com"
+
+
 def get_connection(db_path: str = DB_FILE) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -22,6 +69,7 @@ def init_db(db_path: str = DB_FILE) -> None:
                 placed_at TEXT,
                 market_id TEXT,
                 token_id TEXT,
+                slug TEXT,
                 question TEXT,
                 outcome TEXT,
                 entry_price REAL,
@@ -38,6 +86,18 @@ def init_db(db_path: str = DB_FILE) -> None:
                 note TEXT
             )
         """)
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN slug TEXT")
+        except sqlite3.OperationalError:
+            pass  # Already exists
+
+        # Backfill slug for any cached markets
+        for mid, s_val in _SLUG_CACHE.items():
+            conn.execute(
+                "UPDATE trades SET slug = ? WHERE market_id = ? AND (slug IS NULL OR slug = '')",
+                (s_val, mid)
+            )
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_placed_at ON trades(placed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_token_id ON trades(token_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_result ON trades(result)")
@@ -46,18 +106,20 @@ def init_db(db_path: str = DB_FILE) -> None:
 
 def record_trade(trade: Dict[str, Any], db_path: str = DB_FILE) -> None:
     init_db(db_path)
+    slug_val = trade.get("slug") or resolve_market_slug(trade.get("market_id"))
     with get_connection(db_path) as conn:
         conn.execute("""
             INSERT OR REPLACE INTO trades (
-                trade_id, placed_at, market_id, token_id, question, outcome,
+                trade_id, placed_at, market_id, token_id, slug, question, outcome,
                 entry_price, tokens, cost, time_left, result, resolved_price,
                 payout, pnl, broker, tx_hash, closed_at, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("trade_id"),
             trade.get("placed_at"),
             trade.get("market_id"),
             trade.get("token_id"),
+            slug_val,
             trade.get("question"),
             trade.get("outcome"),
             float(trade.get("entry_price", 0.0)),
@@ -151,6 +213,7 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "placed_at": p.get("opened_at", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
             "market_id": p.get("market_id", ""),
             "token_id": tid,
+            "slug": p.get("slug") or resolve_market_slug(p.get("market_id")),
             "question": p.get("question", ""),
             "outcome": p.get("outcome_label", ""),
             "entry_price": p.get("entry_price", 0.0),
@@ -181,6 +244,7 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "placed_at": t.get("opened_at", t.get("closed_at", "")),
             "market_id": t.get("market_id", ""),
             "token_id": tid,
+            "slug": t.get("slug") or resolve_market_slug(t.get("market_id")),
             "question": t.get("question", ""),
             "outcome": t.get("outcome_label", ""),
             "entry_price": t.get("entry_price", 0.0),
