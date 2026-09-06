@@ -9,3 +9,5 @@ state.json
 settings.json
 .DS_Store
 .agents/
+trades.db
+*.db

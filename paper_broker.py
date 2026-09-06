@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 
 import config
+import database
 import polymarket_client
 import settings_manager
 
@@ -22,6 +23,7 @@ class PaperBroker:
     def __init__(self, state_path=None):
         self.state_path = state_path or config.STATE_FILE
         self.state = self._load()
+        database.sync_from_state(self.state)
 
     def _load(self) -> Dict[str, Any]:
         default_state: Dict[str, Any] = {
@@ -126,7 +128,25 @@ class PaperBroker:
             return None, reason
 
         shares = stake / opp.confirmed_price
+        trade_id = f"trd_ord_{str(opp.token_id)[:8]}"
+
+        time_left_str = "0.0m"
+        if getattr(opp, "end_date", None):
+            try:
+                end_dt = datetime.fromisoformat(str(opp.end_date).replace("Z", "+00:00"))
+                delta = end_dt - datetime.now(timezone.utc)
+                total_min = int(delta.total_seconds() / 60)
+                if total_min < 60:
+                    time_left_str = f"{max(0, total_min)}m"
+                elif total_min < 1440:
+                    time_left_str = f"{total_min / 60:.1f}h"
+                else:
+                    time_left_str = f"{total_min / 1440:.1f}d"
+            except Exception:
+                time_left_str = "0.0m"
+
         position = {
+            "trade_id": trade_id,
             "mode": mode.upper(),
             "token_id": opp.token_id,
             "market_id": opp.market_id,
@@ -139,12 +159,35 @@ class PaperBroker:
             "stake": stake,
             "potential_payout": shares * 1.0,
             "potential_profit": (shares * 1.0) - stake,
+            "time_left": time_left_str,
             "opened_at": _now_iso(),
             "end_date": opp.end_date,
             "game_start_time": getattr(opp, "game_start_time", None),
         }
         self.state["positions"][opp.token_id] = position
         self.state["balance"] -= stake
+
+        # Record into local SQLite database
+        database.record_trade({
+            "trade_id": trade_id,
+            "placed_at": position["opened_at"],
+            "market_id": position["market_id"],
+            "token_id": position["token_id"],
+            "question": position["question"],
+            "outcome": position["outcome_label"],
+            "entry_price": position["entry_price"],
+            "tokens": position["shares"],
+            "cost": position["stake"],
+            "time_left": time_left_str,
+            "result": "PENDING",
+            "resolved_price": None,
+            "payout": None,
+            "pnl": 0.0,
+            "broker": mode.lower(),
+            "tx_hash": None,
+            "closed_at": None,
+            "note": "",
+        })
 
         # Update lifecycle counter
         lc = self.state.setdefault("order_lifecycle", {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0})
@@ -177,6 +220,18 @@ class PaperBroker:
         self.state["closed_trades"].append(trade)
         self.state["balance"] += payout
         self.add_log(f"SETTLED: {position['question'][:45]} [{position['outcome_label']}] pnl={pnl:+.2f} ({note})")
+
+        # Settle in local SQLite database
+        database.settle_trade(
+            token_id=token_id,
+            resolved_price=resolved_price,
+            payout=payout,
+            pnl=pnl,
+            result="WON" if pnl > 0 else "LOST",
+            closed_at=trade["closed_at"],
+            note=note,
+        )
+
         return trade
 
     def check_resolutions(self) -> List[Dict[str, Any]]:

@@ -34,6 +34,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_order_notional": 25.0,  # Max order size in USD
     "bot_status": "RUNNING",     # "RUNNING" or "PAUSED"
     "manual_scan_requested": False,
+    # Wallet Tracking (Data API)
+    "tracked_wallet_address": "",
+    # Health & Confidence Gates
+    "require_healthy_data": True,
+    "require_high_confidence": False,
+    # Late Game Settings
+    "late_game_enabled": False,
+    "require_authoritative_time": False,
+    "late_game_threshold_seconds": 600,
 }
 
 
