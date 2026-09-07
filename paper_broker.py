@@ -2,7 +2,8 @@
 signals cache, and activity logging for the Streamlit dashboard."""
 import json
 import os
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 import config
@@ -76,7 +77,7 @@ class PaperBroker:
 
     @property
     def held_token_ids(self) -> set:
-        return set(self.state["positions"].keys())
+        return {str(p.get("token_id", k)) for k, p in self.state.get("positions", {}).items()}
 
     @property
     def today_trades_count(self) -> int:
@@ -117,7 +118,15 @@ class PaperBroker:
         lc["rejected"] = lc.get("rejected", 0) + 1
         self.save()
 
-    def open_position(self, opp, stake: Optional[float] = None, mode: str = "PAPER", **kwargs) -> Tuple[Optional[Dict[str, Any]], str]:
+    def open_position(
+        self,
+        opp,
+        stake: Optional[float] = None,
+        mode: str = "PAPER",
+        account_name: str = "Primary",
+        wallet_address: Optional[str] = None,
+        **kwargs
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
         settings = settings_manager.load_settings()
         stake = stake if stake is not None else settings.get("stake_per_trade", 25.0)
 
@@ -128,7 +137,11 @@ class PaperBroker:
             return None, reason
 
         shares = stake / opp.confirmed_price
-        trade_id = f"trd_ord_{str(opp.token_id)[:8]}"
+        clean_acc = "".join(c for c in account_name if c.isalnum() or c in ("_", "-"))
+        trade_id = f"trd_ord_{clean_acc}_{str(opp.token_id)[:8]}"
+        pos_key = f"{clean_acc}_{opp.token_id}" if account_name != "Primary" else str(opp.token_id)
+        if pos_key in self.state.get("positions", {}):
+            pos_key = f"{clean_acc}_{opp.token_id}_{int(time.time())}"
 
         time_left_str = "0.0m"
         if getattr(opp, "end_date", None):
@@ -149,6 +162,8 @@ class PaperBroker:
         position = {
             "trade_id": trade_id,
             "mode": mode.upper(),
+            "account_name": account_name,
+            "wallet_address": wallet_address or "",
             "token_id": opp.token_id,
             "market_id": opp.market_id,
             "slug": slug_val,
@@ -166,7 +181,7 @@ class PaperBroker:
             "end_date": opp.end_date,
             "game_start_time": getattr(opp, "game_start_time", None),
         }
-        self.state["positions"][opp.token_id] = position
+        self.state["positions"][pos_key] = position
         self.state["balance"] -= stake
 
         # Record into local SQLite database
@@ -190,6 +205,8 @@ class PaperBroker:
             "tx_hash": None,
             "closed_at": None,
             "note": "",
+            "account_name": account_name,
+            "wallet_address": wallet_address or "",
         })
 
         # Update lifecycle counter
@@ -204,12 +221,12 @@ class PaperBroker:
         else:
             dt["count"] += 1
 
-        self.add_log(f"OPENED [{mode.upper()}]: {opp.question[:45]} [{opp.outcome_label}] @ {opp.confirmed_price:.3f} stake=${stake:.2f}")
+        self.add_log(f"OPENED [{mode.upper()}][{account_name}]: {opp.question[:45]} [{opp.outcome_label}] @ {opp.confirmed_price:.3f} stake=${stake:.2f}")
         self.save()
         return position, ""
 
-    def _close_position(self, token_id: str, resolved_price: float, note: str) -> Dict[str, Any]:
-        position = self.state["positions"].pop(token_id)
+    def _close_position(self, pos_key: str, resolved_price: float, note: str) -> Dict[str, Any]:
+        position = self.state["positions"].pop(pos_key)
         payout = position["shares"] * resolved_price
         pnl = payout - position["stake"]
         trade = {
@@ -222,11 +239,13 @@ class PaperBroker:
         }
         self.state["closed_trades"].append(trade)
         self.state["balance"] += payout
-        self.add_log(f"SETTLED: {position['question'][:45]} [{position['outcome_label']}] pnl={pnl:+.2f} ({note})")
+        acc_str = f"[{position.get('account_name', 'Primary')}] " if position.get('account_name') else ""
+        self.add_log(f"SETTLED {acc_str}: {position['question'][:45]} [{position['outcome_label']}] pnl={pnl:+.2f} ({note})")
 
         # Settle in local SQLite database
         database.settle_trade(
-            token_id=token_id,
+            token_id=str(position.get("token_id", pos_key)),
+            trade_id=position.get("trade_id"),
             resolved_price=resolved_price,
             payout=payout,
             pnl=pnl,
@@ -237,13 +256,22 @@ class PaperBroker:
 
         return trade
 
-    def force_settle_position(self, token_id: str, won: bool = True, note: str = "") -> Optional[Dict[str, Any]]:
+    def force_settle_position(self, token_id_or_key: str, won: bool = True, note: str = "") -> Optional[Dict[str, Any]]:
         """Manually settles an open position as WON (1.0) or LOST (0.0), booking P&L and updating SQLite DB."""
-        if token_id not in self.state.get("positions", {}):
+        positions = self.state.get("positions", {})
+        target_key = None
+        if token_id_or_key in positions:
+            target_key = token_id_or_key
+        else:
+            for k, p in positions.items():
+                if str(p.get("token_id")) == str(token_id_or_key) or str(p.get("trade_id")) == str(token_id_or_key):
+                    target_key = k
+                    break
+        if not target_key:
             return None
         settle_price = 1.0 if won else 0.0
         settle_note = note or ("manual settlement: WON" if won else "manual settlement: LOST")
-        trade = self._close_position(token_id, settle_price, settle_note)
+        trade = self._close_position(target_key, settle_price, settle_note)
         self.save()
         return trade
 
@@ -257,8 +285,9 @@ class PaperBroker:
         client = polymarket_client.get_public_client()
         now_utc = datetime.now(timezone.utc)
 
-        for token_id, position in list(self.state["positions"].items()):
+        for pos_key, position in list(self.state["positions"].items()):
             market_id = position.get("market_id")
+            token_id = str(position.get("token_id", pos_key))
             m = None
             try:
                 m = client.get_market(id=str(market_id))
@@ -281,7 +310,7 @@ class PaperBroker:
                 if is_uma_resolved or (m.state.closed and raw_price is not None and (raw_price >= 0.95 or raw_price <= 0.05)):
                     final_settle_price = 1.0 if (raw_price is not None and raw_price >= 0.5) or is_uma_resolved else 0.0
                     note = "settled (win)" if final_settle_price == 1.0 else "settled (loss)"
-                    trade = self._close_position(token_id, final_settle_price, note)
+                    trade = self._close_position(pos_key, final_settle_price, note)
                     settled.append(trade)
                     continue
 
@@ -302,7 +331,7 @@ class PaperBroker:
                         if is_ended:
                             final_settle_price = 1.0
                             note = f"settled (match completed at {str(end_dt)[:16]})"
-                            trade = self._close_position(token_id, final_settle_price, note)
+                            trade = self._close_position(pos_key, final_settle_price, note)
                             settled.append(trade)
                 except Exception as exc:
                     print(f"[paper_broker] Error checking end_date for {token_id}: {exc}")

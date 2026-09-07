@@ -83,13 +83,23 @@ def init_db(db_path: str = DB_FILE) -> None:
                 broker TEXT DEFAULT 'paper',
                 tx_hash TEXT,
                 closed_at TEXT,
-                note TEXT
+                note TEXT,
+                account_name TEXT DEFAULT 'Primary',
+                wallet_address TEXT
             )
         """)
         try:
             conn.execute("ALTER TABLE trades ADD COLUMN slug TEXT")
         except sqlite3.OperationalError:
             pass  # Already exists
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN account_name TEXT DEFAULT 'Primary'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN wallet_address TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         # Backfill slug for any cached markets
         for mid, s_val in _SLUG_CACHE.items():
@@ -101,6 +111,7 @@ def init_db(db_path: str = DB_FILE) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_placed_at ON trades(placed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_token_id ON trades(token_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_result ON trades(result)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_account_name ON trades(account_name)")
         conn.commit()
 
 
@@ -112,8 +123,8 @@ def record_trade(trade: Dict[str, Any], db_path: str = DB_FILE) -> None:
             INSERT OR REPLACE INTO trades (
                 trade_id, placed_at, market_id, token_id, slug, question, outcome,
                 entry_price, tokens, cost, time_left, result, resolved_price,
-                payout, pnl, broker, tx_hash, closed_at, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payout, pnl, broker, tx_hash, closed_at, note, account_name, wallet_address
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("trade_id"),
             trade.get("placed_at"),
@@ -134,6 +145,8 @@ def record_trade(trade: Dict[str, Any], db_path: str = DB_FILE) -> None:
             trade.get("tx_hash"),
             trade.get("closed_at"),
             trade.get("note", ""),
+            trade.get("account_name", "Primary"),
+            trade.get("wallet_address", ""),
         ))
         conn.commit()
 
@@ -146,20 +159,33 @@ def settle_trade(
     result: str,
     closed_at: str,
     note: str = "",
+    trade_id: Optional[str] = None,
     db_path: str = DB_FILE,
 ) -> bool:
     init_db(db_path)
     with get_connection(db_path) as conn:
-        cursor = conn.execute("""
-            UPDATE trades
-            SET resolved_price = ?,
-                payout = ?,
-                pnl = ?,
-                result = ?,
-                closed_at = ?,
-                note = ?
-            WHERE token_id = ? AND result = 'PENDING'
-        """, (resolved_price, payout, pnl, result, closed_at, note, token_id))
+        if trade_id:
+            cursor = conn.execute("""
+                UPDATE trades
+                SET resolved_price = ?,
+                    payout = ?,
+                    pnl = ?,
+                    result = ?,
+                    closed_at = ?,
+                    note = ?
+                WHERE trade_id = ?
+            """, (resolved_price, payout, pnl, result, closed_at, note, trade_id))
+        else:
+            cursor = conn.execute("""
+                UPDATE trades
+                SET resolved_price = ?,
+                    payout = ?,
+                    pnl = ?,
+                    result = ?,
+                    closed_at = ?,
+                    note = ?
+                WHERE token_id = ? AND result = 'PENDING'
+            """, (resolved_price, payout, pnl, result, closed_at, note, token_id))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -167,6 +193,7 @@ def settle_trade(
 def get_all_trades(
     outcome_filter: Optional[str] = None,
     broker_filter: Optional[str] = None,
+    account_filter: Optional[str] = None,
     limit: int = 200,
     db_path: str = DB_FILE,
 ) -> List[Dict[str, Any]]:
@@ -181,6 +208,10 @@ def get_all_trades(
     if broker_filter and broker_filter != "ALL":
         query += " AND broker = ?"
         params.append(broker_filter.lower())
+
+    if account_filter and account_filter != "ALL":
+        query += " AND account_name = ?"
+        params.append(account_filter)
 
     query += " ORDER BY placed_at DESC LIMIT ?"
     params.append(limit)
@@ -198,6 +229,13 @@ def get_available_outcomes(db_path: str = DB_FILE) -> List[str]:
         return [row[0] for row in cursor.fetchall()]
 
 
+def get_available_accounts(db_path: str = DB_FILE) -> List[str]:
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("SELECT DISTINCT account_name FROM trades WHERE account_name IS NOT NULL AND account_name != '' ORDER BY account_name ASC")
+        return [row[0] for row in cursor.fetchall()]
+
+
 def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
     """Migrates any existing open positions and closed trades from state.json
     into the SQLite database without duplicating entries."""
@@ -212,7 +250,7 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "trade_id": trade_id,
             "placed_at": p.get("opened_at", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
             "market_id": p.get("market_id", ""),
-            "token_id": tid,
+            "token_id": p.get("token_id", tid),
             "slug": p.get("slug") or resolve_market_slug(p.get("market_id")),
             "question": p.get("question", ""),
             "outcome": p.get("outcome_label", ""),
@@ -228,6 +266,8 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "tx_hash": p.get("tx_hash"),
             "closed_at": None,
             "note": "",
+            "account_name": p.get("account_name", "Primary"),
+            "wallet_address": p.get("wallet_address", ""),
         }
         record_trade(trade_data, db_path=db_path)
         count += 1
@@ -259,6 +299,8 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "tx_hash": t.get("tx_hash"),
             "closed_at": t.get("closed_at"),
             "note": t.get("note", ""),
+            "account_name": t.get("account_name", "Primary"),
+            "wallet_address": t.get("wallet_address", ""),
         }
         record_trade(trade_data, db_path=db_path)
         count += 1

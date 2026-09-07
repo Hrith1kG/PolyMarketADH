@@ -475,6 +475,7 @@ with tab_exec:
                 poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
                 df_pos.append({
                     "Verify Trade": poly_url,
+                    "Account": p.get("account_name", "Primary"),
                     "Mode": mode,
                     "Question": p.get("question", "")[:50],
                     "Outcome": p.get("outcome_label", ""),
@@ -495,7 +496,6 @@ with tab_exec:
                     ),
                 },
                 hide_index=True,
-                use_container_width=True,
             )
 
             # Direct 1-click verification & settlement controls
@@ -505,7 +505,8 @@ with tab_exec:
                 poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
                 qc1, qc2, qc3 = st.columns([2.5, 1.1, 1.0])
                 with qc1:
-                    st.markdown(f"**{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
+                    acc_lbl = f"[{p.get('account_name', 'Primary')}] " if p.get("account_name") else ""
+                    st.markdown(f"**{acc_lbl}{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
                 with qc2:
                     st.link_button("🔗 Open Market ↗", poly_url, use_container_width=True)
                 with qc3:
@@ -759,8 +760,20 @@ with tab_live:
             ℹ️ Live data will populate here when LIVE mode is running and readiness is READY.<br>
             To activate live trading, add your Polymarket account credentials to your <code>.env</code> file:
             <pre>
+# Single-Account format:
 PRIVATE_KEY=0x_your_wallet_private_key
-FUNDER_ADDRESS=0x_your_polymarket_profile_wallet_address  # Optional: For email/magic/proxy users
+FUNDER_ADDRESS=0x_your_polymarket_profile_wallet_address  # Optional
+
+# Multi-Account format:
+ACCOUNT_1_NAME=MetaMask_Main
+ACCOUNT_1_PRIVATE_KEY=0x_first_private_key
+ACCOUNT_1_FUNDER_ADDRESS=
+ACCOUNT_1_STAKE=25.0
+
+ACCOUNT_2_NAME=Secondary_Safe
+ACCOUNT_2_PRIVATE_KEY=0x_second_private_key
+ACCOUNT_2_FUNDER_ADDRESS=
+ACCOUNT_2_STAKE=15.0
             </pre>
         </div>
         """, unsafe_allow_html=True)
@@ -768,58 +781,128 @@ FUNDER_ADDRESS=0x_your_polymarket_profile_wallet_address  # Optional: For email/
         # Load live vitals from connected SecureClient
         live_instance = live_broker.get_live_broker()
         if live_instance:
-            vitals = live_instance.get_account_vitals()
-            v_col1, v_col2, v_col3, v_col4 = st.columns(4)
-            with v_col1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-card-title">Connected Wallet</div>
-                    <div class="metric-card-value" style="font-size: 1.1rem; word-break: break-all;">
-                        {vitals['wallet'][:6]}...{vitals['wallet'][-4:]}
+            acc_names = live_instance.get_account_names()
+            acc_filter_choices = ["🌐 Combined (All Accounts)"] + acc_names
+            sel_tab3_acc = st.selectbox("Select Account View", acc_filter_choices, index=0)
+
+            if sel_tab3_acc == "🌐 Combined (All Accounts)":
+                agg = live_instance.get_aggregated_vitals()
+                v_col1, v_col2, v_col3, v_col4 = st.columns(4)
+                with v_col1:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-card-title">Active Accounts</div>
+                        <div class="metric-card-value">{agg['account_count']}</div>
                     </div>
-                </div>
-                """, unsafe_allow_html=True)
-            with v_col2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-card-title">Wallet Type</div>
-                    <div class="metric-card-value">{vitals['wallet_type']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with v_col3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-card-title">Collateral (USDC.e)</div>
-                    <div class="metric-card-value">${vitals['collateral_balance']:,.2f}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with v_col4:
-                allowance_val = vitals['allowance']
-                allowance_disp = "MAX (Unlimited)" if allowance_val > 1_000_000_000 else f"${allowance_val:,.2f}"
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-card-title">Collateral Allowance</div>
-                    <div class="metric-card-value" style="font-size: 1.35rem;">{allowance_disp}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
+                with v_col2:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-card-title">Pooled Collateral (USDC.e)</div>
+                        <div class="metric-card-value">${agg['total_collateral']:,.2f}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with v_col3:
+                    all_orders = live_instance.get_open_orders()
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-card-title">Total Open Orders</div>
+                        <div class="metric-card-value">{len(all_orders)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with v_col4:
+                    all_pos = live_instance.get_live_positions()
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-card-title">Total Live Positions</div>
+                        <div class="metric-card-value">{len(all_pos)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-            # Live Open CLOB Orders
-            st.markdown("#### Open CLOB Orders")
-            live_orders = live_instance.get_open_orders()
-            if not live_orders:
-                st.info("No open CLOB limit orders on the exchange.")
-            else:
-                st.dataframe(pd.DataFrame(live_orders))
+                st.markdown("#### 💼 Connected Accounts Breakdown")
+                breakdown_rows = []
+                for a in agg["accounts"]:
+                    allow_val = a["allowance"]
+                    allow_disp = "MAX" if allow_val > 1_000_000_000 else f"${allow_val:,.2f}"
+                    breakdown_rows.append({
+                        "Account": a["name"],
+                        "Wallet": a["wallet"],
+                        "Type": a["wallet_type"],
+                        "Collateral (USDC.e)": f"${a['collateral_balance']:,.2f}",
+                        "Allowance": allow_disp,
+                        "Stake Per Trade": f"${a.get('stake', config.STAKE_PER_TRADE):.2f}",
+                    })
+                st.dataframe(pd.DataFrame(breakdown_rows), hide_index=True)
 
-            # Live On-Chain Positions
-            st.markdown("#### On-Chain Positions")
-            live_pos = live_instance.get_live_positions()
-            if not live_pos:
-                st.info("No open on-chain positions returned for this wallet.")
+                # Combined Open Orders
+                st.markdown("#### Open CLOB Orders (All Accounts)")
+                if not all_orders:
+                    st.info("No open CLOB limit orders across any account.")
+                else:
+                    st.dataframe(pd.DataFrame(all_orders), hide_index=True)
+
+                # Combined Live Positions
+                st.markdown("#### On-Chain Positions (All Accounts)")
+                if not all_pos:
+                    st.info("No open on-chain positions returned across accounts.")
+                else:
+                    st.dataframe(pd.DataFrame(all_pos), hide_index=True)
+
             else:
-                st.dataframe(pd.DataFrame(live_pos))
+                # Single Account View
+                session = live_instance.get_session(sel_tab3_acc)
+                if session:
+                    vitals = session.get_account_vitals()
+                    v_col1, v_col2, v_col3, v_col4 = st.columns(4)
+                    with v_col1:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-card-title">Connected Wallet</div>
+                            <div class="metric-card-value" style="font-size: 1.1rem; word-break: break-all;">
+                                {vitals['wallet'][:6]}...{vitals['wallet'][-4:]}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with v_col2:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-card-title">Wallet Type</div>
+                            <div class="metric-card-value">{vitals['wallet_type']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with v_col3:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-card-title">Collateral (USDC.e)</div>
+                            <div class="metric-card-value">${vitals['collateral_balance']:,.2f}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with v_col4:
+                        allowance_val = vitals['allowance']
+                        allowance_disp = "MAX (Unlimited)" if allowance_val > 1_000_000_000 else f"${allowance_val:,.2f}"
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-card-title">Collateral Allowance</div>
+                            <div class="metric-card-value" style="font-size: 1.35rem;">{allowance_disp}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    st.markdown(f"#### Open CLOB Orders — `{vitals['name']}`")
+                    live_orders = session.get_open_orders()
+                    if not live_orders:
+                        st.info(f"No open CLOB limit orders for {vitals['name']}.")
+                    else:
+                        st.dataframe(pd.DataFrame(live_orders), hide_index=True)
+
+                    st.markdown(f"#### On-Chain Positions — `{vitals['name']}`")
+                    live_pos = session.get_live_positions()
+                    if not live_pos:
+                        st.info(f"No open on-chain positions for {vitals['name']}.")
+                    else:
+                        st.dataframe(pd.DataFrame(live_pos), hide_index=True)
         else:
             st.warning("Could not initialize Live Broker instance. Check terminal logs for details.")
+
 
 
 # =============================================================
@@ -895,32 +978,44 @@ with tab_signals:
                 for k, v in target_sig.items():
                     setattr(obj, k, v)
 
-                # If live mode is enabled, also execute on CLOB
+                # If live mode is enabled, execute across configured accounts on CLOB
                 if is_live:
                     live_inst = live_broker.get_live_broker()
                     if live_inst:
                         try:
-                            live_inst.place_buy(obj.token_id, obj.confirmed_price, manual_stake)
-                            st.success(f"Live order placed on Polymarket for {obj.question[:40]}!")
+                            results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, default_stake=manual_stake)
+                            any_success = False
+                            for res in results:
+                                if res["success"]:
+                                    any_success = True
+                                    broker.open_position(
+                                        obj,
+                                        stake=res["stake"],
+                                        mode="LIVE",
+                                        account_name=res["account_name"],
+                                        wallet_address=res["wallet"],
+                                    )
+                                    st.success(f"Live order placed for `{res['account_name']}` ({obj.question[:35]})!")
+                                else:
+                                    st.error(f"Order failed for `{res['account_name']}`: {res['error']}")
+                            if any_success:
+                                st.rerun()
+                            else:
+                                st.stop()
                         except Exception as e:
-                            st.error(f"Failed to execute live order: {e}")
+                            st.error(f"Failed to execute live orders: {e}")
                             st.stop()
                     else:
                         st.error("Live broker not ready. Check credentials.")
                         st.stop()
-
-                try:
-                    pos, reason = broker.open_position(obj, stake=manual_stake, mode=execution_mode_str)
-                except TypeError:
-                    pos, reason = broker.open_position(obj, stake=manual_stake)
-                    if pos:
-                        pos["mode"] = execution_mode_str
-
-                if pos:
-                    st.success(f"Successfully opened position on {obj.question[:40]} with ${manual_stake} stake!")
-                    st.rerun()
                 else:
-                    st.error(f"Cannot open position: {reason}")
+                    pos, reason = broker.open_position(obj, stake=manual_stake, mode="PAPER")
+                    if pos:
+                        st.success(f"Successfully opened paper position on {obj.question[:40]} with ${manual_stake} stake!")
+                        st.rerun()
+                    else:
+                        st.error(f"Cannot open position: {reason}")
+
 
 
 # =============================================================
@@ -952,11 +1047,17 @@ with tab_history:
     )
 
     if data_source == "🔴 Bot Execution Log (Local DB)":
-        available_outcomes = ["ALL"] + database.get_available_outcomes()
-        selected_outcome = st.selectbox("Filter by Outcome", available_outcomes)
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            available_outcomes = ["ALL"] + database.get_available_outcomes()
+            selected_outcome = st.selectbox("Filter by Outcome", available_outcomes)
+        with col_f2:
+            available_accounts = ["ALL"] + database.get_available_accounts()
+            selected_account = st.selectbox("Filter by Account", available_accounts)
 
         trades_list = database.get_all_trades(
-            outcome_filter=None if selected_outcome == "ALL" else selected_outcome
+            outcome_filter=None if selected_outcome == "ALL" else selected_outcome,
+            account_filter=None if selected_account == "ALL" else selected_account,
         )
 
         if not trades_list:
@@ -971,9 +1072,10 @@ with tab_history:
                         ot_slug = ot.get("slug") or database.resolve_market_slug(ot.get("market_id"))
                         ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
                         ot_tok = ot.get("token_id")
+                        acc_tag = f"[{ot.get('account_name', 'Primary')}] " if ot.get("account_name") else ""
                         o_c1, o_c2, o_c3 = st.columns([2.5, 1.1, 1.0])
                         with o_c1:
-                            st.markdown(f"**{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
+                            st.markdown(f"**{acc_tag}{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
                         with o_c2:
                             st.link_button("🔗 Open Market ↗", ot_url, use_container_width=True)
                         with o_c3:
@@ -1013,6 +1115,7 @@ with tab_history:
 
                 table_rows.append({
                     "Polymarket": poly_url,
+                    "Account": str(t.get("account_name", "Primary")),
                     "Trade ID": tid_disp,
                     "Placed At": str(t.get("placed_at", ""))[:19].replace("T", " "),
                     "Question": str(t.get("question", "")),
@@ -1035,8 +1138,8 @@ with tab_history:
                     ),
                 },
                 hide_index=True,
-                use_container_width=True,
             )
+
 
     else:
         # Live On-Chain Activity (Data API)
@@ -1151,17 +1254,23 @@ with tab_perf:
         if not live_inst:
             st.warning("⚠️ Live trading credentials are not configured or invalid in `.env`. Go to the **🔴 Live Control** tab to check credentials.")
         else:
+            live_acc_choices = ["🌐 All Live Accounts (Combined)"] + live_inst.get_account_names()
+            selected_perf_acc = st.selectbox("Portfolio Account Filter", live_acc_choices, index=0)
+
+            is_combined = selected_perf_acc == "🌐 All Live Accounts (Combined)"
+            target_acc = None if is_combined else selected_perf_acc
+
             with st.spinner("Fetching live on-chain account metrics..."):
-                live_bal = live_inst.get_collateral_balance()
-                live_allowance = live_inst.get_allowance()
-                live_pos = live_inst.get_live_positions()
-                live_orders = live_inst.get_open_orders()
+                live_bal = live_inst.get_collateral_balance(account_name=target_acc)
+                live_allowance = live_inst.get_allowance(account_name=target_acc)
+                live_pos = live_inst.get_live_positions(account_name=target_acc)
+                live_orders = live_inst.get_open_orders(account_name=target_acc)
 
             live_exposure = sum(float(p.get("current_value", 0.0)) for p in live_pos)
             live_unrealized = sum(float(p.get("cash_pnl", 0.0)) for p in live_pos)
 
-            # Query live trades from SQLite
-            live_trades = database.get_all_trades(broker_filter="live")
+            # Query live trades from SQLite for selected account
+            live_trades = database.get_all_trades(broker_filter="live", account_filter=target_acc)
             closed_live = [t for t in live_trades if "PENDING" not in str(t.get("result", "")).upper()]
             wins_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) > 0])
             losses_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) <= 0])
@@ -1172,8 +1281,9 @@ with tab_perf:
 
             p1, p2, p3, p4, p5, p6 = st.columns(6)
             with p1:
+                lbl_bal = "Total Pooled Collateral" if is_combined else f"Collateral ({selected_perf_acc})"
                 st.metric(
-                    "Live Collateral (USDC.e)",
+                    lbl_bal,
                     f"${live_bal:,.2f}",
                     delta=f"{realized_live:+.2f} Realized P&L" if realized_live != 0 else None,
                 )
@@ -1206,14 +1316,30 @@ with tab_perf:
                     f"{len(closed_live)} settled",
                 )
 
-            st.markdown(f"""
-            <div class="info-callout">
-                👛 <b>Connected Wallet:</b> <code>{live_inst.wallet}</code> ({live_inst.wallet_type}) &nbsp;|&nbsp; 
-                💰 <b>Live USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
-                🔓 <b>Allowance:</b> <code>${live_allowance:,.2f}</code> &nbsp;|&nbsp; 
-                📋 <b>Open CLOB Orders:</b> <code>{len(live_orders)}</code>
-            </div>
-            """, unsafe_allow_html=True)
+            # Info callout
+            if is_combined:
+                agg = live_inst.get_aggregated_vitals()
+                st.markdown(f"""
+                <div class="info-callout">
+                    👥 <b>Configured Accounts:</b> <code>{agg['account_count']} active</code> &nbsp;|&nbsp; 
+                    💰 <b>Pooled USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
+                    📋 <b>Total Open CLOB Orders:</b> <code>{len(live_orders)}</code> &nbsp;|&nbsp;
+                    💼 <b>Total Live Positions:</b> <code>{len(live_pos)}</code>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                sess = live_inst.get_session(target_acc)
+                sess_wallet = sess.wallet if sess else live_inst.wallet
+                sess_wtype = sess.wallet_type if sess else live_inst.wallet_type
+                st.markdown(f"""
+                <div class="info-callout">
+                    👛 <b>Account:</b> <code>{selected_perf_acc}</code> &nbsp;|&nbsp;
+                    🔑 <b>Wallet:</b> <code>{sess_wallet}</code> ({sess_wtype}) &nbsp;|&nbsp; 
+                    💰 <b>Live USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
+                    🔓 <b>Allowance:</b> <code>${live_allowance:,.2f}</code> &nbsp;|&nbsp; 
+                    📋 <b>Open CLOB Orders:</b> <code>{len(live_orders)}</code>
+                </div>
+                """, unsafe_allow_html=True)
 
             if live_pos:
                 st.markdown("#### Currently Held Live Positions")
@@ -1221,8 +1347,12 @@ with tab_perf:
                 for p in live_pos:
                     slug_v = database.resolve_market_slug(p.get("market_id"))
                     p_url = database.get_polymarket_url(slug_v, p.get("market_id"))
-                    df_live_pos.append({
+                    row_data = {
                         "Polymarket": p_url,
+                    }
+                    if is_combined and p.get("account"):
+                        row_data["Account"] = p.get("account")
+                    row_data.update({
                         "Title": p.get("title", "")[:50],
                         "Outcome": p.get("outcome", ""),
                         "Size": p.get("size", 0.0),
@@ -1231,6 +1361,7 @@ with tab_perf:
                         "Cash P&L": f"${p.get('cash_pnl', 0):+.2f}",
                         "% P&L": f"{p.get('percent_pnl', 0):+.1f}%",
                     })
+                    df_live_pos.append(row_data)
                 st.dataframe(
                     pd.DataFrame(df_live_pos),
                     column_config={
@@ -1240,12 +1371,12 @@ with tab_perf:
                         ),
                     },
                     hide_index=True,
-                    use_container_width=True,
                 )
 
             if live_orders:
                 st.markdown("#### Active CLOB Limit Orders")
-                st.dataframe(pd.DataFrame(live_orders), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(live_orders), hide_index=True)
+
 
     else:
         # Paper Simulation View

@@ -52,15 +52,16 @@ def run():
 
                 # If live trading is active and the position won, claim collateral via on-chain CTF redemption
                 if live is not None and trade.get("resolved_price") == 1.0:
+                    trade_acc = trade.get("account_name")
                     try:
-                        log(f"LIVE REDEEM: Claiming on-chain CTF collateral for market {trade['market_id']}...")
-                        outcome = live.redeem_winning_position(market_id=trade["market_id"])
+                        log(f"LIVE REDEEM: Claiming CTF collateral for market {trade['market_id']} ({trade_acc or 'All'})...")
+                        outcome = live.redeem_winning_position(market_id=trade["market_id"], account_name=trade_acc)
                         tx_hash = getattr(outcome, "transaction_hash", outcome)
                         log(f"LIVE REDEEM SUCCESS: TxHash={tx_hash}")
-                        broker.add_log(f"Live CTF redeemed: {trade['question'][:40]} | Tx: {tx_hash}")
+                        broker.add_log(f"Live CTF redeemed [{trade_acc}]: {trade['question'][:40]} | Tx: {tx_hash}")
                     except Exception as redeem_err:
-                        log(f"LIVE REDEEM ERROR: {redeem_err}")
-                        broker.add_log(f"CTF Redeem failed for {trade['market_id']}: {redeem_err}", level="ERROR")
+                        log(f"LIVE REDEEM ERROR [{trade_acc}]: {redeem_err}")
+                        broker.add_log(f"CTF Redeem failed for {trade['market_id']} [{trade_acc}]: {redeem_err}", level="ERROR")
 
             # 2. Check if paused (unless manual scan is triggered)
             if status == "PAUSED" and not manual_trigger:
@@ -83,29 +84,42 @@ def run():
                     log("ENTRY KILL SWITCH ACTIVE: Blocking all new order entries.")
                 else:
                     for opp in opportunities:
-                        stake = settings.get("stake_per_trade", 25.0)
-                        ok, reason = broker.can_open(stake)
-                        if not ok:
-                            broker.record_intention()
-                            broker.record_rejection()
-                            log(f"SKIP      {opp.question[:50]!r} [{opp.outcome_label}] -- {reason}")
-                            continue
+                        default_stake = settings.get("stake_per_trade", 25.0)
 
-                        current_mode = "LIVE" if live is not None else "PAPER"
                         if live is not None:
-                            try:
-                                resp = live.place_buy(opp.token_id, opp.confirmed_price, stake)
-                                log(f"LIVE BUY  {opp.question[:50]!r} [{opp.outcome_label}] "
-                                    f"@ {opp.confirmed_price:.3f} -> {resp}")
-                            except Exception as live_err:
-                                log(f"LIVE ERR  {opp.question[:50]!r} [{opp.outcome_label}] -- {live_err}")
-                                broker.add_log(f"Live order failed: {live_err}", level="ERROR")
+                            # Multi-account parallel execution via ThreadPool
+                            results = live.place_buy_all(opp.token_id, opp.confirmed_price, default_stake=default_stake)
+                            for res in results:
+                                acc_name = res["account_name"]
+                                wallet_addr = res["wallet"]
+                                stake_used = res["stake"]
+
+                                if res["success"]:
+                                    log(f"LIVE BUY [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] "
+                                        f"@ {opp.confirmed_price:.3f} (${stake_used}) -> {res['response']}")
+                                    pos, _ = broker.open_position(
+                                        opp,
+                                        stake=stake_used,
+                                        mode="LIVE",
+                                        account_name=acc_name,
+                                        wallet_address=wallet_addr,
+                                    )
+                                else:
+                                    log(f"LIVE ERR [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] -- {res['error']}")
+                                    broker.add_log(f"Live order failed [{acc_name}]: {res['error']}", level="ERROR")
+                        else:
+                            # Paper trading simulation
+                            ok, reason = broker.can_open(default_stake)
+                            if not ok:
+                                broker.record_intention()
+                                broker.record_rejection()
+                                log(f"SKIP      {opp.question[:50]!r} [{opp.outcome_label}] -- {reason}")
                                 continue
 
-                        position, _ = broker.open_position(opp, stake=stake, mode=current_mode)
-                        if live is None and position is not None:
-                            log(f"PAPER BUY {opp.question[:50]!r} [{opp.outcome_label}] "
-                                f"@ {opp.confirmed_price:.3f} stake=${position['stake']:.2f}")
+                            position, _ = broker.open_position(opp, stake=default_stake, mode="PAPER")
+                            if position is not None:
+                                log(f"PAPER BUY {opp.question[:50]!r} [{opp.outcome_label}] "
+                                    f"@ {opp.confirmed_price:.3f} stake=${position['stake']:.2f}")
 
             # 5. Print summary
             summary = broker.summary()
