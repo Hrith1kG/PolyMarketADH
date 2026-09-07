@@ -8,14 +8,19 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import config
 import importlib
+importlib.reload(config)
 import paper_broker
 importlib.reload(paper_broker)
 from paper_broker import PaperBroker
 import database
 importlib.reload(database)
 import live_broker
+importlib.reload(live_broker)
 import scanner
 import settings_manager
 
@@ -1132,62 +1137,174 @@ with tab_history:
 with tab_perf:
     st.header("📊 Performance Analytics")
 
-    p1, p2, p3, p4, p5, p6 = st.columns(6)
-    with p1:
-        st.metric(
-            "Paper Balance",
-            f"${summary['balance']:,.2f}",
-            delta=f"{summary['realized_pnl']:+.2f} P&L" if summary['realized_pnl'] != 0 else None,
-        )
-    with p2:
-        st.metric(
-            "Open Exposure",
-            f"${summary['open_exposure']:,.2f}",
-            f"Max: ${settings.get('max_total_exposure', 200):,.0f}",
-        )
-    with p3:
-        st.metric(
-            "Open Positions",
-            f"{summary['open_positions']} / {settings.get('max_open_positions', 10)}",
-        )
-    with p4:
-        st.metric(
-            "Trades Today",
-            f"{summary['today_trades']} / {settings.get('max_trades_per_day', 10)}",
-        )
-    with p5:
-        st.metric(
-            "Realized P&L",
-            f"${summary['realized_pnl']:+.2f}",
-            delta=f"{summary['wins']}W / {summary['losses']}L",
-        )
-    with p6:
-        st.metric(
-            "Win Rate",
-            f"{summary['win_rate']:.1f}%",
-            f"{summary['closed_trades']} settled",
-        )
+    # Select between Live On-Chain and Paper Simulation
+    default_perf_idx = 0 if is_live else 1
+    perf_portfolio_view = st.radio(
+        "Select Portfolio View",
+        ["🔴 Live Execution Portfolio (On-Chain)", "📝 Paper Simulation Portfolio"],
+        index=default_perf_idx,
+        horizontal=True,
+    )
 
-    st.markdown("---")
-    st.subheader("Danger Zone")
-    col_r1, col_r2 = st.columns(2)
-    with col_r1:
-        if st.button("🗑️ Reset State / Paper Portfolio", help="Resets balance to starting capital and clears positions"):
-            broker.state = {
-                "balance": config.STARTING_BALANCE,
-                "positions": {},
-                "closed_trades": [],
-                "signals": [],
-                "daily_trades": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0},
-                "order_lifecycle": {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0},
-                "logs": [{"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO", "message": "Portfolio reset by user."}],
-            }
-            broker.save()
-            st.success("Portfolio reset successfully!")
-            st.rerun()
-    with col_r2:
-        if st.button("🔄 Reset Settings to Defaults"):
-            settings_manager.save_settings(settings_manager.DEFAULT_SETTINGS)
-            st.success("Settings restored to factory defaults!")
-            st.rerun()
+    if perf_portfolio_view == "🔴 Live Execution Portfolio (On-Chain)":
+        live_inst = live_broker.get_live_broker()
+        if not live_inst:
+            st.warning("⚠️ Live trading credentials are not configured or invalid in `.env`. Go to the **🔴 Live Control** tab to check credentials.")
+        else:
+            with st.spinner("Fetching live on-chain account metrics..."):
+                live_bal = live_inst.get_collateral_balance()
+                live_allowance = live_inst.get_allowance()
+                live_pos = live_inst.get_live_positions()
+                live_orders = live_inst.get_open_orders()
+
+            live_exposure = sum(float(p.get("current_value", 0.0)) for p in live_pos)
+            live_unrealized = sum(float(p.get("cash_pnl", 0.0)) for p in live_pos)
+
+            # Query live trades from SQLite
+            live_trades = database.get_all_trades(broker_filter="live")
+            closed_live = [t for t in live_trades if "PENDING" not in str(t.get("result", "")).upper()]
+            wins_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) > 0])
+            losses_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) <= 0])
+            realized_live = sum(float(t.get("pnl", 0.0)) for t in closed_live)
+            win_rate_live = (wins_live / len(closed_live) * 100) if closed_live else 0.0
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_live = len([t for t in live_trades if str(t.get("placed_at", "")).startswith(today_str)])
+
+            p1, p2, p3, p4, p5, p6 = st.columns(6)
+            with p1:
+                st.metric(
+                    "Live Collateral (USDC.e)",
+                    f"${live_bal:,.2f}",
+                    delta=f"{realized_live:+.2f} Realized P&L" if realized_live != 0 else None,
+                )
+            with p2:
+                st.metric(
+                    "Live Exposure",
+                    f"${live_exposure:,.2f}",
+                    delta=f"{live_unrealized:+.2f} Unrealized" if live_unrealized != 0 else None,
+                )
+            with p3:
+                st.metric(
+                    "Open Positions",
+                    f"{len(live_pos)} / {settings.get('max_open_positions', 10)}",
+                )
+            with p4:
+                st.metric(
+                    "Trades Today",
+                    f"{today_live} / {settings.get('max_trades_per_day', 10)}",
+                )
+            with p5:
+                st.metric(
+                    "Realized P&L",
+                    f"${realized_live:+.2f}",
+                    delta=f"{wins_live}W / {losses_live}L",
+                )
+            with p6:
+                st.metric(
+                    "Win Rate",
+                    f"{win_rate_live:.1f}%",
+                    f"{len(closed_live)} settled",
+                )
+
+            st.markdown(f"""
+            <div class="info-callout">
+                👛 <b>Connected Wallet:</b> <code>{live_inst.wallet}</code> ({live_inst.wallet_type}) &nbsp;|&nbsp; 
+                💰 <b>Live USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
+                🔓 <b>Allowance:</b> <code>${live_allowance:,.2f}</code> &nbsp;|&nbsp; 
+                📋 <b>Open CLOB Orders:</b> <code>{len(live_orders)}</code>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if live_pos:
+                st.markdown("#### Currently Held Live Positions")
+                df_live_pos = []
+                for p in live_pos:
+                    slug_v = database.resolve_market_slug(p.get("market_id"))
+                    p_url = database.get_polymarket_url(slug_v, p.get("market_id"))
+                    df_live_pos.append({
+                        "Polymarket": p_url,
+                        "Title": p.get("title", "")[:50],
+                        "Outcome": p.get("outcome", ""),
+                        "Size": p.get("size", 0.0),
+                        "Avg Price": f"${p.get('avg_price', 0):.4f}",
+                        "Current Value": f"${p.get('current_value', 0):.2f}",
+                        "Cash P&L": f"${p.get('cash_pnl', 0):+.2f}",
+                        "% P&L": f"{p.get('percent_pnl', 0):+.1f}%",
+                    })
+                st.dataframe(
+                    pd.DataFrame(df_live_pos),
+                    column_config={
+                        "Polymarket": st.column_config.LinkColumn(
+                            "Polymarket",
+                            display_text="🔗 View on Polymarket ↗",
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+            if live_orders:
+                st.markdown("#### Active CLOB Limit Orders")
+                st.dataframe(pd.DataFrame(live_orders), hide_index=True, use_container_width=True)
+
+    else:
+        # Paper Simulation View
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
+        with p1:
+            st.metric(
+                "Paper Balance",
+                f"${summary['balance']:,.2f}",
+                delta=f"{summary['realized_pnl']:+.2f} P&L" if summary['realized_pnl'] != 0 else None,
+            )
+        with p2:
+            st.metric(
+                "Open Exposure",
+                f"${summary['open_exposure']:,.2f}",
+                f"Max: ${settings.get('max_total_exposure', 200):,.0f}",
+            )
+        with p3:
+            st.metric(
+                "Open Positions",
+                f"{summary['open_positions']} / {settings.get('max_open_positions', 10)}",
+            )
+        with p4:
+            st.metric(
+                "Trades Today",
+                f"{summary['today_trades']} / {settings.get('max_trades_per_day', 10)}",
+            )
+        with p5:
+            st.metric(
+                "Realized P&L",
+                f"${summary['realized_pnl']:+.2f}",
+                delta=f"{summary['wins']}W / {summary['losses']}L",
+            )
+        with p6:
+            st.metric(
+                "Win Rate",
+                f"{summary['win_rate']:.1f}%",
+                f"{summary['closed_trades']} settled",
+            )
+
+        st.markdown("---")
+        st.subheader("Paper Danger Zone")
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            if st.button("🗑️ Reset State / Paper Portfolio", help="Resets paper balance to $1,000 and clears paper positions (does NOT affect your live wallet)"):
+                broker.state = {
+                    "balance": config.STARTING_BALANCE,
+                    "positions": {},
+                    "closed_trades": [],
+                    "signals": [],
+                    "daily_trades": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0},
+                    "order_lifecycle": {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0},
+                    "logs": [{"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO", "message": "Portfolio reset by user."}],
+                }
+                broker.save()
+                st.success("Paper portfolio reset successfully!")
+                st.rerun()
+        with col_r2:
+            if st.button("🔄 Reset Settings to Defaults"):
+                settings_manager.save_settings(settings_manager.DEFAULT_SETTINGS)
+                st.success("Settings restored to factory defaults!")
+                st.rerun()
 
