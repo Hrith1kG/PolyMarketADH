@@ -4,6 +4,7 @@ import concurrent.futures
 from typing import Dict, Any, List, Optional, Tuple
 import config
 import polymarket_client
+import settings_manager
 
 
 class LiveBrokerError(Exception):
@@ -76,7 +77,7 @@ class AccountSession:
             "wallet": self.wallet,
             "wallet_type": self.wallet_type,
             "funder_address": self.funder_address,
-            "stake": self.custom_stake,
+            "stake": settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE),
             "collateral_balance": self.get_collateral_balance(),
             "allowance": self.get_allowance(),
         }
@@ -131,7 +132,7 @@ class AccountSession:
 
     def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None) -> Any:
         """Places a limit buy for stake_usd shares at `price`."""
-        stake = stake_usd if stake_usd is not None else self.custom_stake
+        stake = stake_usd if stake_usd is not None else settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE)
         size = round(stake / price, 2)
         try:
             response = self.client.place_limit_order(
@@ -254,7 +255,7 @@ class LiveBroker:
         workers = min(len(self.account_list), 5)
 
         def _execute_session(session: AccountSession):
-            stake = session.custom_stake or default_stake
+            stake = settings_manager.get_account_stake(session.name, fallback=session.custom_stake or default_stake)
             try:
                 resp = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
                 return {

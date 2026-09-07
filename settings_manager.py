@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "entry_kill_switch": False,  # Blocks new trade entries when True
     "max_slippage": 0.005,       # 0.5% max price slippage
     "max_order_notional": 25.0,  # Max order size in USD
+    "account_stakes": {},        # Dynamic per-account stake overrides: {"AccountName": 25.0}
     "bot_status": "RUNNING",     # "RUNNING" or "PAUSED"
     "manual_scan_requested": False,
     # Wallet Tracking (Data API)
@@ -84,3 +85,26 @@ def get_setting(key: str, default: Any = None) -> Any:
     """Gets a single setting value."""
     settings = load_settings()
     return settings.get(key, default)
+
+
+def get_account_stake(account_name: str, fallback: Any = None) -> float:
+    """Returns dynamic stake configured for an account, falling back to custom_stake or global stake_per_trade."""
+    settings = load_settings()
+    stakes = settings.get("account_stakes", {})
+    if account_name in stakes and stakes[account_name] is not None:
+        try:
+            return float(stakes[account_name])
+        except (ValueError, TypeError):
+            pass
+    if fallback is not None:
+        return float(fallback)
+    return float(settings.get("stake_per_trade", 25.0))
+
+
+def set_account_stake(account_name: str, stake: float) -> None:
+    """Updates dynamic stake for a specific account."""
+    settings = load_settings()
+    stakes = dict(settings.get("account_stakes", {}))
+    stakes[account_name] = float(stake)
+    settings["account_stakes"] = stakes
+    save_settings(settings)

@@ -744,15 +744,38 @@ ACCOUNT_2_STAKE=15.0
                 for a in agg["accounts"]:
                     allow_val = a["allowance"]
                     allow_disp = "MAX" if allow_val > 1_000_000_000 else f"${allow_val:,.2f}"
+                    act_stk = settings_manager.get_account_stake(a["name"], fallback=a.get("stake", config.STAKE_PER_TRADE))
                     breakdown_rows.append({
                         "Account": a["name"],
                         "Wallet": a["wallet"],
                         "Type": a["wallet_type"],
                         "Collateral (USDC.e)": f"${a['collateral_balance']:,.2f}",
                         "Allowance": allow_disp,
-                        "Stake Per Trade": f"${a.get('stake', config.STAKE_PER_TRADE):.2f}",
+                        "Stake Per Trade": f"${act_stk:.2f}",
                     })
                 st.dataframe(pd.DataFrame(breakdown_rows), hide_index=True)
+
+                if len(agg["accounts"]) > 1:
+                    st.markdown("##### ⚡ Dynamic Per-Account Stake Sizing")
+                    st.caption("Change trade sizing for any account instantly without editing `.env` or restarting the bot:")
+                    stk_cols = st.columns(len(agg["accounts"]))
+                    for idx, a in enumerate(agg["accounts"]):
+                        acc_n = a["name"]
+                        cur_acc_stk = settings_manager.get_account_stake(acc_n, fallback=a.get("stake", config.STAKE_PER_TRADE))
+                        with stk_cols[idx]:
+                            new_val = st.number_input(
+                                f"{acc_n} Stake ($)",
+                                min_value=1.0,
+                                max_value=1000.0,
+                                value=float(cur_acc_stk),
+                                step=5.0,
+                                key=f"tab3_acc_stk_{acc_n}",
+                                help=f"Trade stake in USD specifically for {acc_n}",
+                            )
+                            if new_val != cur_acc_stk:
+                                settings_manager.set_account_stake(acc_n, new_val)
+                                st.success(f"Updated {acc_n} stake to ${new_val:.2f}!")
+                                st.rerun()
 
                 # Combined Open Orders
                 st.subheader("Open CLOB Orders (All Accounts)")
@@ -780,7 +803,23 @@ ACCOUNT_2_STAKE=15.0
                         st.metric("Connected Wallet", f"{vitals['wallet'][:6]}...{vitals['wallet'][-4:]}", help=vitals['wallet'], border=True)
                         st.metric("Wallet Type", vitals['wallet_type'], border=True)
                         st.metric("Collateral (USDC.e)", f"${vitals['collateral_balance']:,.2f}", border=True)
-                        st.metric("Collateral Allowance", allowance_disp, border=True)
+                        st.metric("Stake Per Trade", f"${vitals['stake']:.2f}", border=True)
+
+                    with st.container(border=True):
+                        cur_single_stk = settings_manager.get_account_stake(vitals["name"], fallback=vitals.get("stake", config.STAKE_PER_TRADE))
+                        new_single_stk = st.number_input(
+                            f"Update {vitals['name']} Stake ($)",
+                            min_value=1.0,
+                            max_value=1000.0,
+                            value=float(cur_single_stk),
+                            step=5.0,
+                            key=f"single_acc_stk_{vitals['name']}",
+                            help=f"Dynamically update stake for {vitals['name']} without restarting the bot.",
+                        )
+                        if new_single_stk != cur_single_stk:
+                            settings_manager.set_account_stake(vitals["name"], new_single_stk)
+                            st.success(f"Updated {vitals['name']} stake to ${new_single_stk:.2f}!")
+                            st.rerun()
 
                     st.subheader(f"Open CLOB Orders — `{vitals['name']}`")
                     live_orders = session.get_open_orders()
