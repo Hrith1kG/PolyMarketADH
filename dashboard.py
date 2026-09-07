@@ -25,71 +25,36 @@ import scanner
 import settings_manager
 
 st.set_page_config(
-    page_title="Polymarket Sureshot Control Panel",
-    page_icon="⚡",
+    page_title="Polymarket Sureshot Terminal",
+    page_icon=":material/bolt:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom Styling matching dark-theme reference screenshots
+# Terminal dark-mode typography & metric card polish
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #171b26;
+    div[data-testid="stMetric"] {
+        background: #111622;
+        border: 1px solid #1E293B;
         border-radius: 8px;
-        padding: 16px 20px;
-        border: 1px solid #252c3d;
-        margin-bottom: 12px;
+        padding: 12px 16px;
     }
-    .metric-card-title {
-        font-size: 0.85rem;
-        color: #8fa0b5;
-        margin-bottom: 6px;
+    div[data-testid="stMetricLabel"] p {
+        font-size: 0.78rem;
+        font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.6px;
+        color: #94A3B8;
     }
-    .metric-card-value {
-        font-size: 1.75rem;
+    div[data-testid="stMetricValue"] {
+        font-size: 1.6rem;
         font-weight: 700;
-        color: #ffffff;
-    }
-    .status-running {
-        color: #00e676;
-        font-weight: bold;
-    }
-    .status-paused {
-        color: #ffb300;
-        font-weight: bold;
-    }
-    .status-ready {
-        color: #00e676;
-        font-weight: bold;
-    }
-    .status-warning {
-        color: #ff5252;
-        font-weight: bold;
-    }
-    .info-callout {
-        background-color: #122338;
-        border-left: 4px solid #1976d2;
-        padding: 12px 16px;
-        border-radius: 4px;
-        color: #90caf9;
-        margin-bottom: 16px;
-        font-size: 0.95rem;
-    }
-    .caution-banner {
-        background-color: #332b12;
-        border-left: 4px solid #ffb300;
-        padding: 12px 16px;
-        border-radius: 4px;
-        color: #ffe082;
-        margin-bottom: 16px;
-        font-size: 0.95rem;
-        font-weight: 500;
+        color: #F8FAFC;
     }
 </style>
 """, unsafe_allow_html=True)
+
 
 
 def get_broker() -> PaperBroker:
@@ -193,35 +158,42 @@ creds_ok, creds_msg = live_broker.check_credentials_available()
 # SIDEBAR: PRIMARY STRATEGY CONTROLS
 # ==========================================
 with st.sidebar:
-    st.title("⚡ Control Panel")
+    st.markdown("### :material/tune: Control Panel")
 
-    # --- Bot Execution State ---
-    st.subheader("Bot Status")
-    status = settings.get("bot_status", "RUNNING")
-    if status == "RUNNING":
-        st.markdown('Current Status: <span class="status-running">🟢 RUNNING</span>', unsafe_allow_html=True)
-        if st.button("⏸️ Pause Bot Execution"):
-            settings_manager.update_setting("bot_status", "PAUSED")
+    with st.container(border=True):
+        st.caption("Engine Status & Mode")
+        status = settings.get("bot_status", "RUNNING")
+        col_sb_status, col_sb_mode = st.columns(2)
+        with col_sb_status:
+            if status == "RUNNING":
+                st.badge("RUNNING", icon=":material/play_arrow:", color="green")
+            else:
+                st.badge("PAUSED", icon=":material/pause:", color="orange")
+        with col_sb_mode:
+            if is_live:
+                st.badge("LIVE", icon=":material/wifi:", color="blue")
+            else:
+                st.badge("PAPER", icon=":material/description:", color="gray")
+
+        st.write("")
+        if status == "RUNNING":
+            if st.button("Pause Bot", icon=":material/pause:"):
+                settings_manager.update_setting("bot_status", "PAUSED")
+                st.rerun()
+        else:
+            if st.button("Resume Bot", icon=":material/play_arrow:"):
+                settings_manager.update_setting("bot_status", "RUNNING")
+                st.rerun()
+
+        if st.button("Trigger Scan Now", icon=":material/radar:"):
+            settings_manager.update_setting("manual_scan_requested", True)
+            with st.spinner("Scanning Polymarket sports markets..."):
+                opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
+                broker.save_signals(opps)
+                broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
+            st.success(f"Scan complete! Found {len(opps)} signals.")
             st.rerun()
-    else:
-        st.markdown('Current Status: <span class="status-paused">🟡 PAUSED</span>', unsafe_allow_html=True)
-        if st.button("▶️ Resume Bot Execution"):
-            settings_manager.update_setting("bot_status", "RUNNING")
-            st.rerun()
 
-    # --- Mode Quick Indicator in Sidebar ---
-    st.markdown(f"**Execution Mode:** `{execution_mode_str}`")
-
-    if st.button("🔄 Trigger Immediate Scan"):
-        settings_manager.update_setting("manual_scan_requested", True)
-        with st.spinner("Scanning Polymarket sports markets..."):
-            opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
-            broker.save_signals(opps)
-            broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
-        st.success(f"Scan complete! Found {len(opps)} signals.")
-        st.rerun()
-
-    st.markdown("---")
 
     # --- Settings Form ---
     with st.form("sidebar_config_form"):
@@ -383,8 +355,8 @@ with st.sidebar:
 # ==========================================
 # MAIN DASHBOARD TABS
 # ==========================================
-st.title("⚡ Polymarket Sureshot: Execution Control Panel")
-st.caption("Sports Moneyline Ultra-Probability Automated Trading Engine")
+st.title(":material/bolt: Polymarket Sureshot Terminal")
+st.caption("Institutional-Grade Ultra-Probability Sports Moneyline Execution Engine")
 
 # Top Navigation Tabs matching user reference screenshots
 (
@@ -395,17 +367,17 @@ st.caption("Sports Moneyline Ultra-Probability Automated Trading Engine")
     tab_history,
     tab_perf,
 ) = st.tabs([
-    "⚙️ Execution Pipeline",
-    "🚨 Operations & Health",
-    "🔴 Live Control",
-    "🎯 Market Signals",
-    "📜 Trade History",
-    "📊 Performance Analytics",
+    ":material/sync_alt: Execution Pipeline",
+    ":material/health_and_safety: Operations & Health",
+    ":material/tune: Live Control",
+    ":material/radar: Market Signals",
+    ":material/history: Trade History",
+    ":material/analytics: Performance Analytics",
 ])
 
 
 # =============================================================
-# TAB 1: EXECUTION PIPELINE (Matches Screenshot 1)
+# TAB 1: EXECUTION PIPELINE
 # =============================================================
 with tab_exec:
     st.header("Order Management & Execution Pipeline")
@@ -417,51 +389,48 @@ with tab_exec:
     pending_count = lifecycle.get("pending", 0)
     reserved_capital = summary.get("reserved_capital", summary.get("open_exposure", 0.0))
 
-    st.subheader("🏦 Pipeline Metrics")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Execution Mode</div>
-            <div class="metric-card-value">{execution_mode_str}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Total Intentions</div>
-            <div class="metric-card-value">{intentions_count}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Filled Orders</div>
-            <div class="metric-card-value">{filled_count}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Reserved Capital</div>
-            <div class="metric-card-value">${reserved_capital:,.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.subheader("Pipeline Metrics")
+    with st.container(horizontal=True):
+        st.metric(
+            "Execution Mode",
+            execution_mode_str,
+            delta="REAL CAPITAL" if is_live else "SIMULATED",
+            delta_color="normal" if is_live else "off",
+            border=True,
+        )
+        st.metric(
+            "Total Intentions",
+            intentions_count,
+            help="Total trade opportunities evaluated by execution engine",
+            border=True,
+        )
+        st.metric(
+            "Filled Orders",
+            filled_count,
+            delta=f"{rejected_count} rejected" if rejected_count else "0 rejected",
+            delta_color="inverse" if rejected_count else "off",
+            border=True,
+        )
+        st.metric(
+            "Reserved Capital",
+            f"${reserved_capital:,.2f}",
+            border=True,
+        )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.write("")
 
     col_lifecycle, col_positions = st.columns([1, 2.5])
 
     with col_lifecycle:
-        st.subheader("📋 Order Lifecycle")
+        st.subheader("Order Lifecycle")
         with st.container(border=True):
-            st.markdown(f"**Total Intentions:** `{intentions_count}`")
-            st.markdown(f"**Pending Validation:** `{pending_count}`")
-            st.markdown(f"**Filled Orders:** ✅ `{filled_count}`")
-            st.markdown(f"**Rejected (Risk/Sizing):** ❌ `{rejected_count}`")
+            st.metric("Total Intentions", intentions_count)
+            st.metric("Pending Validation", pending_count)
+            st.metric("Filled Orders", filled_count)
+            st.metric("Rejected (Risk/Sizing)", rejected_count)
 
     with col_positions:
-        st.subheader("💼 Open Positions (Tracked)")
+        st.subheader("Open Positions (Tracked)")
         positions = state.get("positions", {})
         if not positions:
             st.info("No active positions currently tracked.")
@@ -508,58 +477,54 @@ with tab_exec:
                     acc_lbl = f"[{p.get('account_name', 'Primary')}] " if p.get("account_name") else ""
                     st.markdown(f"**{acc_lbl}{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
                 with qc2:
-                    st.link_button("🔗 Open Market ↗", poly_url, use_container_width=True)
+                    st.link_button("Open Market", poly_url, icon=":material/open_in_new:", width="stretch")
                 with qc3:
-                    pop = st.popover("⚡ Settle", use_container_width=True)
+                    pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                     with pop:
                         st.caption(f"Settle {p.get('question')[:30]}...")
-                        if st.button("✅ Settle WON (1.0)", key=f"t1_won_{tid[:10]}", use_container_width=True):
+                        if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"t1_won_{tid[:10]}", width="stretch"):
                             broker.force_settle_position(tid, won=True, note="Manual settlement via Dashboard: WON")
                             st.success("Settled as WON!")
                             st.rerun()
-                        if st.button("❌ Settle LOST (0.0)", key=f"t1_lost_{tid[:10]}", use_container_width=True):
+                        if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"t1_lost_{tid[:10]}", width="stretch"):
                             broker.force_settle_position(tid, won=False, note="Manual settlement via Dashboard: LOST")
                             st.warning("Settled as LOST.")
                             st.rerun()
 
 
 # =============================================================
-# TAB 2: OPERATIONS & HEALTH (Matches Screenshot 2)
+# TAB 2: OPERATIONS & HEALTH
 # =============================================================
 with tab_ops:
     st.header("System Health & Operations")
 
-    st.subheader("🖥️ Lifecycle State")
-    lc1, lc2, lc3 = st.columns(3)
-    with lc1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Dashboard State</div>
-            <div class="metric-card-value">{status}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with lc2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Execution Mode</div>
-            <div class="metric-card-value">{execution_mode_str}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with lc3:
-        st.markdown("""
-        <div class="metric-card">
-            <div class="metric-card-title">System State Store</div>
-            <div class="metric-card-value">CONNECTED</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.subheader("Lifecycle State")
+    with st.container(horizontal=True):
+        st.metric(
+            "Dashboard State",
+            status,
+            delta="ACTIVE" if status == "RUNNING" else "HALTED",
+            delta_color="normal" if status == "RUNNING" else "inverse",
+            border=True,
+        )
+        st.metric(
+            "Execution Mode",
+            execution_mode_str,
+            delta="MAINNET" if is_live else "SANDBOX",
+            delta_color="normal" if is_live else "off",
+            border=True,
+        )
+        st.metric(
+            "System State Store",
+            "CONNECTED",
+            delta="SQLite & State JSON",
+            delta_color="normal",
+            border=True,
+        )
 
-    st.markdown("""
-    <div class="info-callout">
-        ℹ️ For real-time background bot logs, check your terminal output. The dashboard connects directly to the state store to ensure no performance impact on the trading loop.
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("Real-time background execution loop logs are output directly to terminal / NSSM service logs. The dashboard connects directly to the state store to ensure zero latency impact on the trading loop.")
 
-    st.subheader("🛡️ Circuit Breakers & Gates")
+    st.subheader("Circuit Breakers & Risk Gates")
     p_floor = float(settings.get("price_min", 0.97)) * 100
     p_ceil = float(settings.get("price_max", 0.995)) * 100
     daily_limit = int(settings.get("max_trades_per_day", 10))
@@ -575,7 +540,7 @@ with tab_ops:
         {"Rule": "Entry Kill Switch", "Value": "ACTIVE" if kill_switch_active else "ARMED", "Status": "ENFORCED"},
         {"Rule": "Sports Moneyline Filter", "Value": "Tag 100639 / ML", "Status": "ENFORCED"},
     ]
-    st.dataframe(pd.DataFrame(gates_data))
+    st.dataframe(pd.DataFrame(gates_data), hide_index=True)
 
     st.markdown("---")
     st.subheader("Activity Stream Logs")
@@ -590,176 +555,151 @@ with tab_ops:
                 "Level": item.get("level", "INFO"),
                 "Message": item.get("message", ""),
             })
-        st.dataframe(pd.DataFrame(df_logs))
+        st.dataframe(pd.DataFrame(df_logs), hide_index=True)
 
 
 # =============================================================
-# TAB 3: LIVE CONTROL (Matches Screenshot 3)
+# TAB 3: LIVE CONTROL
 # =============================================================
 with tab_live:
-    st.header("🔴 LIVE TRADING CONTROL")
-    st.markdown("""
-    <div class="caution-banner">
-        ⚠️ These controls directly affect real capital on Polymarket.
-    </div>
-    """, unsafe_allow_html=True)
+    st.header("Live Trading Control")
+    st.warning("These controls directly affect real capital on Polymarket mainnet.")
 
-    st.subheader("LIVE_READINESS")
-    lr1, lr2, lr3, lr4 = st.columns(4)
-
+    st.subheader("Live Execution Readiness")
     live_enabled_label = "TRUE" if is_live else "FALSE"
-    live_enabled_icon = "✅" if is_live else "❌"
-
-    kill_switch_label = "ON" if kill_switch_active else "OFF"
-    kill_switch_icon = "🔴" if kill_switch_active else "🟢"
-
-    creds_label = "OK" if creds_ok else "MISSING"
-    creds_icon = "✅" if creds_ok else "❌"
+    kill_switch_label = "ACTIVE" if kill_switch_active else "OFF"
+    creds_label = "CONFIGURED" if creds_ok else "MISSING"
 
     if not is_live:
-        readiness_label = "NOT_LIVE_MODE"
-        readiness_icon = "🔴"
+        readiness_label = "PAPER_MODE"
     elif not creds_ok:
         readiness_label = "MISSING_CREDS"
-        readiness_icon = "⚠️"
     else:
-        readiness_label = "READY"
-        readiness_icon = "🟢"
+        readiness_label = "LIVE_READY"
 
-    with lr1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Live Enabled</div>
-            <div class="metric-card-value">{live_enabled_icon} {live_enabled_label}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with lr2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Entry Kill Switch</div>
-            <div class="metric-card-value">{kill_switch_icon} {kill_switch_label}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with lr3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Credentials</div>
-            <div class="metric-card-value">{creds_icon} {creds_label}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with lr4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-card-title">Live Readiness</div>
-            <div class="metric-card-value">{readiness_icon} {readiness_label}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    with st.container(horizontal=True):
+        st.metric(
+            "Live Mode",
+            live_enabled_label,
+            delta="ACTIVE" if is_live else "DISABLED",
+            delta_color="normal" if is_live else "off",
+            border=True,
+        )
+        st.metric(
+            "Entry Kill Switch",
+            kill_switch_label,
+            delta="BLOCKED" if kill_switch_active else "NORMAL",
+            delta_color="inverse" if kill_switch_active else "normal",
+            border=True,
+        )
+        st.metric(
+            "Credentials",
+            creds_label,
+            delta="VERIFIED" if creds_ok else "MISSING",
+            delta_color="normal" if creds_ok else "inverse",
+            border=True,
+        )
+        st.metric(
+            "Live Readiness",
+            readiness_label,
+            delta="READY" if readiness_label == "LIVE_READY" else "INACTIVE",
+            delta_color="normal" if readiness_label == "LIVE_READY" else "off",
+            border=True,
+        )
 
     # Dynamic status notice banner
     if not is_live:
-        st.markdown("""
-        <div class="info-callout">
-            ℹ️ Current EXECUTION_MODE is <b>PAPER</b>. Toggle <b>'Enable LIVE Trading'</b> below to switch dynamically without restarting the bot.
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("Current EXECUTION_MODE is **PAPER**. Toggle **'Enable LIVE Trading'** below to switch dynamically without restarting the bot.")
     else:
-        st.markdown("""
-        <div class="caution-banner">
-            ⚡ Current EXECUTION_MODE is <b>LIVE</b>. Real orders are placed on Polymarket mainnet. Toggle OFF below to return to PAPER mode at any time.
-        </div>
-        """, unsafe_allow_html=True)
+        st.warning("Current EXECUTION_MODE is **LIVE**. Real orders are placed on Polymarket mainnet. Toggle OFF below to return to PAPER mode at any time.")
 
-    st.subheader("Control Panel")
-    cp_col1, cp_col2 = st.columns(2)
+    st.subheader("Engine Controls")
+    with st.container(border=True):
+        cp_col1, cp_col2 = st.columns(2)
 
-    with cp_col1:
-        # Live Trading Toggle
-        toggle_live = st.toggle(
-            "Enable LIVE Trading",
-            value=is_live,
-            help="Enables real on-chain execution via Polymarket CLOB. Requires PRIVATE_KEY in .env.",
-        )
-        if toggle_live != is_live:
-            if toggle_live:
-                if not creds_ok:
-                    st.error(f"Cannot enable Live Trading: {creds_msg}. Configure PRIVATE_KEY in your .env file first.")
+        with cp_col1:
+            toggle_live = st.toggle(
+                "Enable LIVE Trading",
+                value=is_live,
+                help="Enables real on-chain execution via Polymarket CLOB. Requires PRIVATE_KEY in .env.",
+            )
+            if toggle_live != is_live:
+                if toggle_live:
+                    if not creds_ok:
+                        st.error(f"Cannot enable Live Trading: {creds_msg}. Configure PRIVATE_KEY in your .env file first.")
+                    else:
+                        settings_manager.update_setting("live_trading", True)
+                        st.success("LIVE Trading ENABLED! The background loop will trade live on next cycle.")
+                        st.rerun()
                 else:
-                    settings_manager.update_setting("live_trading", True)
-                    st.success("LIVE Trading ENABLED! The background loop will trade live on next cycle.")
+                    settings_manager.update_setting("live_trading", False)
+                    st.info("LIVE Trading DISABLED. Bot switched back to PAPER mode.")
                     st.rerun()
-            else:
-                settings_manager.update_setting("live_trading", False)
-                st.info("LIVE Trading DISABLED. Bot switched back to PAPER mode.")
+
+            toggle_kill = st.toggle(
+                "Entry Kill Switch (blocks new entries)",
+                value=kill_switch_active,
+                help="Immediately halts opening any new orders while leaving position tracking and resolution active.",
+            )
+            if toggle_kill != kill_switch_active:
+                settings_manager.update_setting("entry_kill_switch", toggle_kill)
                 st.rerun()
 
-        # Entry Kill Switch Toggle
-        toggle_kill = st.toggle(
-            "Entry Kill Switch (blocks new entries)",
-            value=kill_switch_active,
-            help="Immediately halts opening any new orders while leaving position tracking and resolution active.",
-        )
-        if toggle_kill != kill_switch_active:
-            settings_manager.update_setting("entry_kill_switch", toggle_kill)
-            st.rerun()
+            current_stake = float(settings.get("stake_per_trade", 25.0))
+            notional_input = st.number_input(
+                "Max Order Notional ($)",
+                min_value=1.0,
+                max_value=1000.0,
+                value=current_stake,
+                step=5.0,
+                help="Maximum USD stake per single trade order.",
+            )
+            if notional_input != current_stake:
+                settings_manager.update_setting("stake_per_trade", notional_input)
 
-        # Max Order Notional
-        current_stake = float(settings.get("stake_per_trade", 25.0))
-        notional_input = st.number_input(
-            "Max Order Notional ($)",
-            min_value=1.0,
-            max_value=1000.0,
-            value=current_stake,
-            step=5.0,
-            help="Maximum USD stake per single trade order.",
-        )
-        if notional_input != current_stake:
-            settings_manager.update_setting("stake_per_trade", notional_input)
+        with cp_col2:
+            current_max_pos = int(settings.get("max_open_positions", 10))
+            max_pos_input = st.number_input(
+                "Max Open Positions",
+                min_value=1,
+                max_value=50,
+                value=current_max_pos,
+                step=1,
+            )
+            if max_pos_input != current_max_pos:
+                settings_manager.update_setting("max_open_positions", max_pos_input)
 
-    with cp_col2:
-        current_max_pos = int(settings.get("max_open_positions", 10))
-        max_pos_input = st.number_input(
-            "Max Open Positions",
-            min_value=1,
-            max_value=50,
-            value=current_max_pos,
-            step=1,
-        )
-        if max_pos_input != current_max_pos:
-            settings_manager.update_setting("max_open_positions", max_pos_input)
+            current_daily_limit = int(settings.get("max_trades_per_day", 10))
+            daily_limit_input = st.number_input(
+                "Daily Trade Limit",
+                min_value=1,
+                max_value=100,
+                value=current_daily_limit,
+                step=1,
+            )
+            if daily_limit_input != current_daily_limit:
+                settings_manager.update_setting("max_trades_per_day", daily_limit_input)
 
-        current_daily_limit = int(settings.get("max_trades_per_day", 10))
-        daily_limit_input = st.number_input(
-            "Daily Trade Limit",
-            min_value=1,
-            max_value=100,
-            value=current_daily_limit,
-            step=1,
-        )
-        if daily_limit_input != current_daily_limit:
-            settings_manager.update_setting("max_trades_per_day", daily_limit_input)
+            current_slippage = float(settings.get("max_slippage", 0.005))
+            slippage_input = st.number_input(
+                "Max Slippage Price",
+                min_value=0.001,
+                max_value=0.05,
+                value=current_slippage,
+                step=0.001,
+                format="%.3f",
+                help="Maximum allowed difference between quoted price and fill price.",
+            )
+            if slippage_input != current_slippage:
+                settings_manager.update_setting("max_slippage", slippage_input)
 
-        current_slippage = float(settings.get("max_slippage", 0.005))
-        slippage_input = st.number_input(
-            "Max Slippage Price",
-            min_value=0.001,
-            max_value=0.05,
-            value=current_slippage,
-            step=0.001,
-            format="%.3f",
-            help="Maximum allowed difference between quoted price and fill price.",
-        )
-        if slippage_input != current_slippage:
-            settings_manager.update_setting("max_slippage", slippage_input)
-
-    st.markdown("---")
-    st.subheader("Live Account & Orders")
+    st.subheader("Live Accounts & Orders")
 
     if not creds_ok:
-        st.markdown("""
-        <div class="info-callout">
-            ℹ️ Live data will populate here when LIVE mode is running and readiness is READY.<br>
-            To activate live trading, add your Polymarket account credentials to your <code>.env</code> file:
-            <pre>
+        st.info("""
+Live data will populate here when LIVE mode is running and readiness is READY.
+To activate live trading, add your Polymarket account credentials to your `.env` file:
+```bash
 # Single-Account format:
 PRIVATE_KEY=0x_your_wallet_private_key
 FUNDER_ADDRESS=0x_your_polymarket_profile_wallet_address  # Optional
@@ -774,52 +714,32 @@ ACCOUNT_2_NAME=Secondary_Safe
 ACCOUNT_2_PRIVATE_KEY=0x_second_private_key
 ACCOUNT_2_FUNDER_ADDRESS=
 ACCOUNT_2_STAKE=15.0
-            </pre>
-        </div>
-        """, unsafe_allow_html=True)
+```
+""")
     else:
         # Load live vitals from connected SecureClient
         live_instance = live_broker.get_live_broker()
         if live_instance:
             acc_names = live_instance.get_account_names()
-            acc_filter_choices = ["🌐 Combined (All Accounts)"] + acc_names
-            sel_tab3_acc = st.selectbox("Select Account View", acc_filter_choices, index=0)
+            acc_filter_choices = ["Combined (All Accounts)"] + acc_names
+            sel_tab3_acc = st.segmented_control(
+                "Select Account View",
+                acc_filter_choices,
+                default="Combined (All Accounts)",
+            ) or "Combined (All Accounts)"
 
-            if sel_tab3_acc == "🌐 Combined (All Accounts)":
+            if sel_tab3_acc == "Combined (All Accounts)":
                 agg = live_instance.get_aggregated_vitals()
-                v_col1, v_col2, v_col3, v_col4 = st.columns(4)
-                with v_col1:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-title">Active Accounts</div>
-                        <div class="metric-card-value">{agg['account_count']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with v_col2:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-title">Pooled Collateral (USDC.e)</div>
-                        <div class="metric-card-value">${agg['total_collateral']:,.2f}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with v_col3:
-                    all_orders = live_instance.get_open_orders()
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-title">Total Open Orders</div>
-                        <div class="metric-card-value">{len(all_orders)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with v_col4:
-                    all_pos = live_instance.get_live_positions()
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-title">Total Live Positions</div>
-                        <div class="metric-card-value">{len(all_pos)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                all_orders = live_instance.get_open_orders()
+                all_pos = live_instance.get_live_positions()
 
-                st.markdown("#### 💼 Connected Accounts Breakdown")
+                with st.container(horizontal=True):
+                    st.metric("Active Accounts", agg['account_count'], border=True)
+                    st.metric("Pooled Collateral (USDC.e)", f"${agg['total_collateral']:,.2f}", border=True)
+                    st.metric("Total Open Orders", len(all_orders), border=True)
+                    st.metric("Total Live Positions", len(all_pos), border=True)
+
+                st.subheader("Connected Accounts Breakdown")
                 breakdown_rows = []
                 for a in agg["accounts"]:
                     allow_val = a["allowance"]
@@ -835,14 +755,14 @@ ACCOUNT_2_STAKE=15.0
                 st.dataframe(pd.DataFrame(breakdown_rows), hide_index=True)
 
                 # Combined Open Orders
-                st.markdown("#### Open CLOB Orders (All Accounts)")
+                st.subheader("Open CLOB Orders (All Accounts)")
                 if not all_orders:
                     st.info("No open CLOB limit orders across any account.")
                 else:
                     st.dataframe(pd.DataFrame(all_orders), hide_index=True)
 
                 # Combined Live Positions
-                st.markdown("#### On-Chain Positions (All Accounts)")
+                st.subheader("On-Chain Positions (All Accounts)")
                 if not all_pos:
                     st.info("No open on-chain positions returned across accounts.")
                 else:
@@ -853,48 +773,23 @@ ACCOUNT_2_STAKE=15.0
                 session = live_instance.get_session(sel_tab3_acc)
                 if session:
                     vitals = session.get_account_vitals()
-                    v_col1, v_col2, v_col3, v_col4 = st.columns(4)
-                    with v_col1:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-card-title">Connected Wallet</div>
-                            <div class="metric-card-value" style="font-size: 1.1rem; word-break: break-all;">
-                                {vitals['wallet'][:6]}...{vitals['wallet'][-4:]}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with v_col2:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-card-title">Wallet Type</div>
-                            <div class="metric-card-value">{vitals['wallet_type']}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with v_col3:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-card-title">Collateral (USDC.e)</div>
-                            <div class="metric-card-value">${vitals['collateral_balance']:,.2f}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with v_col4:
-                        allowance_val = vitals['allowance']
-                        allowance_disp = "MAX (Unlimited)" if allowance_val > 1_000_000_000 else f"${allowance_val:,.2f}"
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-card-title">Collateral Allowance</div>
-                            <div class="metric-card-value" style="font-size: 1.35rem;">{allowance_disp}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    allowance_val = vitals['allowance']
+                    allowance_disp = "MAX (Unlimited)" if allowance_val > 1_000_000_000 else f"${allowance_val:,.2f}"
 
-                    st.markdown(f"#### Open CLOB Orders — `{vitals['name']}`")
+                    with st.container(horizontal=True):
+                        st.metric("Connected Wallet", f"{vitals['wallet'][:6]}...{vitals['wallet'][-4:]}", help=vitals['wallet'], border=True)
+                        st.metric("Wallet Type", vitals['wallet_type'], border=True)
+                        st.metric("Collateral (USDC.e)", f"${vitals['collateral_balance']:,.2f}", border=True)
+                        st.metric("Collateral Allowance", allowance_disp, border=True)
+
+                    st.subheader(f"Open CLOB Orders — `{vitals['name']}`")
                     live_orders = session.get_open_orders()
                     if not live_orders:
                         st.info(f"No open CLOB limit orders for {vitals['name']}.")
                     else:
                         st.dataframe(pd.DataFrame(live_orders), hide_index=True)
 
-                    st.markdown(f"#### On-Chain Positions — `{vitals['name']}`")
+                    st.subheader(f"On-Chain Positions — `{vitals['name']}`")
                     live_pos = session.get_live_positions()
                     if not live_pos:
                         st.info(f"No open on-chain positions for {vitals['name']}.")
@@ -909,25 +804,26 @@ ACCOUNT_2_STAKE=15.0
 # TAB 4: MARKET SIGNALS
 # =============================================================
 with tab_signals:
-    st.header("🎯 Live Sureshot Sports Signals")
+    st.header("Live Sureshot Sports Signals")
     signals = state.get("signals", [])
 
     if not signals:
-        st.info("No signals matching current threshold criteria in the latest scan. Click 'Trigger Immediate Scan' in the sidebar or wait for the next loop.")
+        st.info("No signals matching current threshold criteria in the latest scan. Click 'Trigger Scan Now' in the sidebar or wait for the next loop.")
     else:
         st.caption(f"Showing {len(signals)} top qualifying match(es) from recent scan.")
         df_signals = []
         for s in signals:
             slug = s.get("slug", "") or database.resolve_market_slug(s.get("market_id"))
             poly_url = database.get_polymarket_url(slug, s.get("market_id"))
+            conf_price = float(s.get('confirmed_price', 0) or 0.0)
             df_signals.append({
                 "Polymarket": poly_url,
                 "Match / Game": s.get("question"),
                 "Outcome": s.get("outcome_label"),
-                "Confirmed Price": f"${s.get('confirmed_price', 0):.3f}",
-                "Implied Win %": f"{s.get('confirmed_price', 0) * 100:.1f}%",
-                "24h Volume": f"${s.get('volume', 0):,.0f}",
-                "Liquidity": f"${s.get('liquidity', 0):,.0f}",
+                "Price": conf_price,
+                "Implied Win %": round(conf_price * 100, 1),
+                "24h Volume": float(s.get('volume', 0) or 0.0),
+                "Liquidity": float(s.get('liquidity', 0) or 0.0),
                 "Market Type": s.get("market_type", "moneyline"),
                 "End Date": s.get("end_date", "N/A"),
                 "Token ID": s.get("token_id"),
@@ -940,98 +836,117 @@ with tab_signals:
                     display_text="🔗 View Market ↗",
                     help="Click to inspect this market on Polymarket",
                 ),
+                "Price": st.column_config.NumberColumn(
+                    "Price",
+                    format="$%.3f",
+                ),
+                "Implied Win %": st.column_config.ProgressColumn(
+                    "Implied Win %",
+                    help="Estimated winning probability based on orderbook pricing",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "24h Volume": st.column_config.NumberColumn(
+                    "24h Volume",
+                    format="$%d",
+                ),
+                "Liquidity": st.column_config.NumberColumn(
+                    "Liquidity",
+                    format="$%d",
+                ),
             },
             hide_index=True,
-            use_container_width=True,
         )
 
         # Manual Trade Executor
-        st.markdown("### Manual Trade Trigger")
-        st.write(f"Execute a trade in **{execution_mode_str}** mode on one of the signals:")
-        signal_options = {f"{s['question'][:60]} ({s['outcome_label']} @ {s['confirmed_price']:.3f})": s for s in signals}
-        selected_signal_name = st.selectbox("Select Signal to Trade", list(signal_options.keys()))
+        st.subheader("Manual Trade Trigger")
+        with st.container(border=True):
+            st.write(f"Execute a trade in **{execution_mode_str}** mode on one of the detected signals:")
+            signal_options = {f"{s['question'][:60]} ({s['outcome_label']} @ {s['confirmed_price']:.3f})": s for s in signals}
+            selected_signal_name = st.selectbox("Select Signal to Trade", list(signal_options.keys()))
 
-        selected_sig = signal_options[selected_signal_name]
-        sel_slug = selected_sig.get("slug") or database.resolve_market_slug(selected_sig.get("market_id"))
-        sel_url = database.get_polymarket_url(sel_slug, selected_sig.get("market_id"))
-        st.link_button(f"🔗 Inspect '{selected_sig.get('question')[:45]}...' on Polymarket ↗", sel_url)
+            selected_sig = signal_options[selected_signal_name]
+            sel_slug = selected_sig.get("slug") or database.resolve_market_slug(selected_sig.get("market_id"))
+            sel_url = database.get_polymarket_url(sel_slug, selected_sig.get("market_id"))
+            st.link_button(f"Inspect '{selected_sig.get('question')[:45]}...' on Polymarket", sel_url, icon=":material/open_in_new:")
 
-        col_stake, col_btn = st.columns([2, 1])
-        with col_stake:
-            manual_stake = st.number_input(
-                "Trade Stake ($)",
-                min_value=1.0,
-                max_value=500.0,
-                value=float(settings.get("stake_per_trade", 25.0)),
-                step=5.0,
-                key="manual_stake_input",
-            )
-        with col_btn:
-            st.write("")
-            st.write("")
-            btn_label = f"🚀 Open {execution_mode_str} Position"
-            if st.button(btn_label):
-                target_sig = signal_options[selected_signal_name]
-                class SigObj:
-                    pass
-                obj = SigObj()
-                for k, v in target_sig.items():
-                    setattr(obj, k, v)
+            col_stake, col_btn = st.columns([2, 1])
+            with col_stake:
+                manual_stake = st.number_input(
+                    "Trade Stake ($)",
+                    min_value=1.0,
+                    max_value=500.0,
+                    value=float(settings.get("stake_per_trade", 25.0)),
+                    step=5.0,
+                    key="manual_stake_input",
+                )
+            with col_btn:
+                st.write("")
+                st.write("")
+                btn_label = f"Open {execution_mode_str} Position"
+                if st.button(btn_label, icon=":material/rocket_launch:", width="stretch"):
+                    target_sig = signal_options[selected_signal_name]
+                    class SigObj:
+                        pass
+                    obj = SigObj()
+                    for k, v in target_sig.items():
+                        setattr(obj, k, v)
 
-                # If live mode is enabled, execute across configured accounts on CLOB
-                if is_live:
-                    live_inst = live_broker.get_live_broker()
-                    if live_inst:
-                        try:
-                            results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, default_stake=manual_stake)
-                            any_success = False
-                            for res in results:
-                                if res["success"]:
-                                    any_success = True
-                                    broker.open_position(
-                                        obj,
-                                        stake=res["stake"],
-                                        mode="LIVE",
-                                        account_name=res["account_name"],
-                                        wallet_address=res["wallet"],
-                                    )
-                                    st.success(f"Live order placed for `{res['account_name']}` ({obj.question[:35]})!")
+                    # If live mode is enabled, execute across configured accounts on CLOB
+                    if is_live:
+                        live_inst = live_broker.get_live_broker()
+                        if live_inst:
+                            try:
+                                results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, default_stake=manual_stake)
+                                any_success = False
+                                for res in results:
+                                    if res["success"]:
+                                        any_success = True
+                                        broker.open_position(
+                                            obj,
+                                            stake=res["stake"],
+                                            mode="LIVE",
+                                            account_name=res["account_name"],
+                                            wallet_address=res["wallet"],
+                                        )
+                                        st.success(f"Live order placed for `{res['account_name']}` ({obj.question[:35]})!")
+                                    else:
+                                        st.error(f"Order failed for `{res['account_name']}`: {res['error']}")
+                                if any_success:
+                                    st.rerun()
                                 else:
-                                    st.error(f"Order failed for `{res['account_name']}`: {res['error']}")
-                            if any_success:
-                                st.rerun()
-                            else:
+                                    st.stop()
+                            except Exception as e:
+                                st.error(f"Failed to execute live orders: {e}")
                                 st.stop()
-                        except Exception as e:
-                            st.error(f"Failed to execute live orders: {e}")
+                        else:
+                            st.error("Live broker not ready. Check credentials.")
                             st.stop()
                     else:
-                        st.error("Live broker not ready. Check credentials.")
-                        st.stop()
-                else:
-                    pos, reason = broker.open_position(obj, stake=manual_stake, mode="PAPER")
-                    if pos:
-                        st.success(f"Successfully opened paper position on {obj.question[:40]} with ${manual_stake} stake!")
-                        st.rerun()
-                    else:
-                        st.error(f"Cannot open position: {reason}")
+                        pos, reason = broker.open_position(obj, stake=manual_stake, mode="PAPER")
+                        if pos:
+                            st.success(f"Successfully opened paper position on {obj.question[:40]} with ${manual_stake} stake!")
+                            st.rerun()
+                        else:
+                            st.error(f"Cannot open position: {reason}")
 
 
 
 # =============================================================
-# TAB 5: TRADE HISTORY & ON-CHAIN ACTIVITY (Matches Screenshot)
+# TAB 5: TRADE HISTORY & ON-CHAIN ACTIVITY
 # =============================================================
 with tab_history:
     col_hdr, col_actions = st.columns([2.5, 1.5])
     with col_hdr:
-        st.header("📜 Trade History & On-Chain Activity")
+        st.header("Trade History & On-Chain Activity")
     with col_actions:
         btn_c1, btn_c2 = st.columns(2)
         with btn_c1:
-            if st.button("🔄 Refresh History"):
+            if st.button("Refresh", icon=":material/refresh:", width="stretch"):
                 st.rerun()
         with btn_c2:
-            if st.button("⚡ Settle Completed"):
+            if st.button("Settle Completed", icon=":material/done_all:", width="stretch"):
                 with st.spinner("Checking market resolutions and completed matches..."):
                     settled = broker.check_resolutions()
                     if settled:
@@ -1040,13 +955,13 @@ with tab_history:
                         st.info("No open trades are ready to settle automatically.")
                 st.rerun()
 
-    data_source = st.radio(
+    data_source = st.segmented_control(
         "Select Data Source",
-        ["🔴 Bot Execution Log (Local DB)", "⛓️ Live On-Chain Activity (Data API)"],
-        horizontal=True,
-    )
+        ["Bot Execution Log (Local DB)", "Live On-Chain Activity (Data API)"],
+        default="Bot Execution Log (Local DB)",
+    ) or "Bot Execution Log (Local DB)"
 
-    if data_source == "🔴 Bot Execution Log (Local DB)":
+    if data_source == "Bot Execution Log (Local DB)":
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             available_outcomes = ["ALL"] + database.get_available_outcomes()
@@ -1077,16 +992,16 @@ with tab_history:
                         with o_c1:
                             st.markdown(f"**{acc_tag}{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
                         with o_c2:
-                            st.link_button("🔗 Open Market ↗", ot_url, use_container_width=True)
+                            st.link_button("Open Market", ot_url, icon=":material/open_in_new:", width="stretch")
                         with o_c3:
-                            pop = st.popover("⚡ Settle", use_container_width=True)
+                            pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                             with pop:
                                 st.caption(f"Settle {ot.get('question')[:30]}...")
-                                if st.button("✅ Settle WON (1.0)", key=f"t5_won_{str(ot_tok)[:10]}", use_container_width=True):
+                                if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"t5_won_{str(ot_tok)[:10]}", width="stretch"):
                                     broker.force_settle_position(ot_tok, won=True, note="Manual settlement via Dashboard: WON")
                                     st.success("Settled as WON!")
                                     st.rerun()
-                                if st.button("❌ Settle LOST (0.0)", key=f"t5_lost_{str(ot_tok)[:10]}", use_container_width=True):
+                                if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"t5_lost_{str(ot_tok)[:10]}", width="stretch"):
                                     broker.force_settle_position(ot_tok, won=False, note="Manual settlement via Dashboard: LOST")
                                     st.warning("Settled as LOST.")
                                     st.rerun()
@@ -1143,7 +1058,7 @@ with tab_history:
 
     else:
         # Live On-Chain Activity (Data API)
-        st.subheader("⛓️ Live On-Chain Activity (Data API)")
+        st.subheader("Live On-Chain Activity (Data API)")
         tracked_addr = settings.get("tracked_wallet_address", "").strip()
 
         col_addr_in, col_fetch_btn = st.columns([3, 1])
@@ -1157,30 +1072,26 @@ with tab_history:
         with col_fetch_btn:
             st.write("")
             st.write("")
-            if st.button("🔍 Fetch Live Data"):
+            if st.button("Fetch Live Data", icon=":material/search:", width="stretch"):
                 if addr_val.strip() != tracked_addr:
                     settings_manager.update_setting("tracked_wallet_address", addr_val.strip())
                     st.rerun()
 
         active_addr = addr_val.strip() or tracked_addr
         if not active_addr or not active_addr.startswith("0x") or len(active_addr) < 40:
-            st.markdown("""
-            <div class="info-callout">
-                ℹ️ Enter a valid Polymarket wallet address (<code>0x...</code>) in the input above or in the sidebar to populate live on-chain trades, positions, and P&L.
-            </div>
-            """, unsafe_allow_html=True)
+            st.info("Enter a valid Polymarket wallet address (`0x...`) in the input above or in the sidebar to populate live on-chain trades, positions, and P&L.")
         else:
             with st.spinner(f"Fetching on-chain Data API feed for {active_addr[:8]}..."):
                 oc_trades, oc_positions, oc_closed = fetch_on_chain_wallet_data(active_addr)
 
             oc_t1, oc_t2, oc_t3 = st.tabs([
-                "💼 Open Positions",
-                "📈 Filled Trades History",
-                "📜 Settled & Realized P&L",
+                ":material/work: Open Positions",
+                ":material/trending_up: Filled Trades History",
+                ":material/receipt_long: Settled & Realized P&L",
             ])
 
             with oc_t1:
-                st.markdown("#### Currently Held On-Chain Positions")
+                st.subheader("Currently Held On-Chain Positions")
                 if not oc_positions:
                     st.info(f"No active positions found for {active_addr[:10]}...")
                 else:
@@ -1194,11 +1105,10 @@ with tab_history:
                             ),
                         },
                         hide_index=True,
-                        use_container_width=True,
                     )
 
             with oc_t2:
-                st.markdown("#### Live Filled Orders & Trades Log")
+                st.subheader("Live Filled Orders & Trades Log")
                 if not oc_trades:
                     st.info(f"No recent filled trades found for {active_addr[:10]}...")
                 else:
@@ -1212,11 +1122,10 @@ with tab_history:
                             ),
                         },
                         hide_index=True,
-                        use_container_width=True,
                     )
 
             with oc_t3:
-                st.markdown("#### Resolved Positions & Realized P&L")
+                st.subheader("Resolved Positions & Realized P&L")
                 if not oc_closed:
                     st.info(f"No historical settled positions found for {active_addr[:10]}...")
                 else:
@@ -1230,7 +1139,6 @@ with tab_history:
                             ),
                         },
                         hide_index=True,
-                        use_container_width=True,
                     )
 
 
@@ -1238,26 +1146,30 @@ with tab_history:
 # TAB 6: PERFORMANCE ANALYTICS
 # =============================================================
 with tab_perf:
-    st.header("📊 Performance Analytics")
+    st.header("Performance Analytics")
 
     # Select between Live On-Chain and Paper Simulation
-    default_perf_idx = 0 if is_live else 1
-    perf_portfolio_view = st.radio(
+    perf_options = ["Live Execution Portfolio (On-Chain)", "Paper Simulation Portfolio"]
+    default_perf = perf_options[0] if is_live else perf_options[1]
+    perf_portfolio_view = st.segmented_control(
         "Select Portfolio View",
-        ["🔴 Live Execution Portfolio (On-Chain)", "📝 Paper Simulation Portfolio"],
-        index=default_perf_idx,
-        horizontal=True,
-    )
+        perf_options,
+        default=default_perf,
+    ) or default_perf
 
-    if perf_portfolio_view == "🔴 Live Execution Portfolio (On-Chain)":
+    if perf_portfolio_view == "Live Execution Portfolio (On-Chain)":
         live_inst = live_broker.get_live_broker()
         if not live_inst:
-            st.warning("⚠️ Live trading credentials are not configured or invalid in `.env`. Go to the **🔴 Live Control** tab to check credentials.")
+            st.warning("Live trading credentials are not configured or invalid in `.env`. Check credentials in the **Live Control** tab.")
         else:
-            live_acc_choices = ["🌐 All Live Accounts (Combined)"] + live_inst.get_account_names()
-            selected_perf_acc = st.selectbox("Portfolio Account Filter", live_acc_choices, index=0)
+            live_acc_choices = ["All Accounts (Combined)"] + live_inst.get_account_names()
+            selected_perf_acc = st.segmented_control(
+                "Portfolio Account Filter",
+                live_acc_choices,
+                default="All Accounts (Combined)",
+            ) or "All Accounts (Combined)"
 
-            is_combined = selected_perf_acc == "🌐 All Live Accounts (Combined)"
+            is_combined = selected_perf_acc == "All Accounts (Combined)"
             target_acc = None if is_combined else selected_perf_acc
 
             with st.spinner("Fetching live on-chain account metrics..."):
@@ -1279,70 +1191,55 @@ with tab_perf:
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             today_live = len([t for t in live_trades if str(t.get("placed_at", "")).startswith(today_str)])
 
-            p1, p2, p3, p4, p5, p6 = st.columns(6)
-            with p1:
-                lbl_bal = "Total Pooled Collateral" if is_combined else f"Collateral ({selected_perf_acc})"
+            lbl_bal = "Pooled Collateral" if is_combined else f"Collateral ({selected_perf_acc})"
+            with st.container(horizontal=True):
                 st.metric(
                     lbl_bal,
                     f"${live_bal:,.2f}",
                     delta=f"{realized_live:+.2f} Realized P&L" if realized_live != 0 else None,
+                    border=True,
                 )
-            with p2:
                 st.metric(
                     "Live Exposure",
                     f"${live_exposure:,.2f}",
                     delta=f"{live_unrealized:+.2f} Unrealized" if live_unrealized != 0 else None,
+                    border=True,
                 )
-            with p3:
                 st.metric(
                     "Open Positions",
                     f"{len(live_pos)} / {settings.get('max_open_positions', 10)}",
+                    border=True,
                 )
-            with p4:
                 st.metric(
                     "Trades Today",
                     f"{today_live} / {settings.get('max_trades_per_day', 10)}",
+                    border=True,
                 )
-            with p5:
                 st.metric(
                     "Realized P&L",
                     f"${realized_live:+.2f}",
                     delta=f"{wins_live}W / {losses_live}L",
+                    border=True,
                 )
-            with p6:
                 st.metric(
                     "Win Rate",
                     f"{win_rate_live:.1f}%",
                     f"{len(closed_live)} settled",
+                    border=True,
                 )
 
             # Info callout
             if is_combined:
                 agg = live_inst.get_aggregated_vitals()
-                st.markdown(f"""
-                <div class="info-callout">
-                    👥 <b>Configured Accounts:</b> <code>{agg['account_count']} active</code> &nbsp;|&nbsp; 
-                    💰 <b>Pooled USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
-                    📋 <b>Total Open CLOB Orders:</b> <code>{len(live_orders)}</code> &nbsp;|&nbsp;
-                    💼 <b>Total Live Positions:</b> <code>{len(live_pos)}</code>
-                </div>
-                """, unsafe_allow_html=True)
+                st.info(f"**Configured Accounts:** `{agg['account_count']} active` · **Pooled USDC.e:** `${live_bal:,.2f}` · **Total Open CLOB Orders:** `{len(live_orders)}` · **Total Live Positions:** `{len(live_pos)}`")
             else:
                 sess = live_inst.get_session(target_acc)
                 sess_wallet = sess.wallet if sess else live_inst.wallet
                 sess_wtype = sess.wallet_type if sess else live_inst.wallet_type
-                st.markdown(f"""
-                <div class="info-callout">
-                    👛 <b>Account:</b> <code>{selected_perf_acc}</code> &nbsp;|&nbsp;
-                    🔑 <b>Wallet:</b> <code>{sess_wallet}</code> ({sess_wtype}) &nbsp;|&nbsp; 
-                    💰 <b>Live USDC.e:</b> <code>${live_bal:,.2f}</code> &nbsp;|&nbsp; 
-                    🔓 <b>Allowance:</b> <code>${live_allowance:,.2f}</code> &nbsp;|&nbsp; 
-                    📋 <b>Open CLOB Orders:</b> <code>{len(live_orders)}</code>
-                </div>
-                """, unsafe_allow_html=True)
+                st.info(f"**Account:** `{selected_perf_acc}` · **Wallet:** `{sess_wallet}` ({sess_wtype}) · **Live USDC.e:** `${live_bal:,.2f}` · **Allowance:** `${live_allowance:,.2f}` · **Open CLOB Orders:** `{len(live_orders)}`")
 
             if live_pos:
-                st.markdown("#### Currently Held Live Positions")
+                st.subheader("Currently Held Live Positions")
                 df_live_pos = []
                 for p in live_pos:
                     slug_v = database.resolve_market_slug(p.get("market_id"))
@@ -1374,68 +1271,68 @@ with tab_perf:
                 )
 
             if live_orders:
-                st.markdown("#### Active CLOB Limit Orders")
+                st.subheader("Active CLOB Limit Orders")
                 st.dataframe(pd.DataFrame(live_orders), hide_index=True)
 
 
     else:
         # Paper Simulation View
-        p1, p2, p3, p4, p5, p6 = st.columns(6)
-        with p1:
+        with st.container(horizontal=True):
             st.metric(
                 "Paper Balance",
                 f"${summary['balance']:,.2f}",
                 delta=f"{summary['realized_pnl']:+.2f} P&L" if summary['realized_pnl'] != 0 else None,
+                border=True,
             )
-        with p2:
             st.metric(
                 "Open Exposure",
                 f"${summary['open_exposure']:,.2f}",
                 f"Max: ${settings.get('max_total_exposure', 200):,.0f}",
+                border=True,
             )
-        with p3:
             st.metric(
                 "Open Positions",
                 f"{summary['open_positions']} / {settings.get('max_open_positions', 10)}",
+                border=True,
             )
-        with p4:
             st.metric(
                 "Trades Today",
                 f"{summary['today_trades']} / {settings.get('max_trades_per_day', 10)}",
+                border=True,
             )
-        with p5:
             st.metric(
                 "Realized P&L",
                 f"${summary['realized_pnl']:+.2f}",
                 delta=f"{summary['wins']}W / {summary['losses']}L",
+                border=True,
             )
-        with p6:
             st.metric(
                 "Win Rate",
                 f"{summary['win_rate']:.1f}%",
                 f"{summary['closed_trades']} settled",
+                border=True,
             )
 
-        st.markdown("---")
-        st.subheader("Paper Danger Zone")
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            if st.button("🗑️ Reset State / Paper Portfolio", help="Resets paper balance to $1,000 and clears paper positions (does NOT affect your live wallet)"):
-                broker.state = {
-                    "balance": config.STARTING_BALANCE,
-                    "positions": {},
-                    "closed_trades": [],
-                    "signals": [],
-                    "daily_trades": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0},
-                    "order_lifecycle": {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0},
-                    "logs": [{"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO", "message": "Portfolio reset by user."}],
-                }
-                broker.save()
-                st.success("Paper portfolio reset successfully!")
-                st.rerun()
-        with col_r2:
-            if st.button("🔄 Reset Settings to Defaults"):
-                settings_manager.save_settings(settings_manager.DEFAULT_SETTINGS)
-                st.success("Settings restored to factory defaults!")
-                st.rerun()
+        st.subheader("Paper Maintenance")
+        with st.container(border=True):
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                if st.button("Reset State / Paper Portfolio", icon=":material/delete_forever:", help="Resets paper balance to $1,000 and clears paper positions (does NOT affect your live wallet)", width="stretch"):
+                    broker.state = {
+                        "balance": config.STARTING_BALANCE,
+                        "positions": {},
+                        "closed_trades": [],
+                        "signals": [],
+                        "daily_trades": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0},
+                        "order_lifecycle": {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0},
+                        "logs": [{"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO", "message": "Portfolio reset by user."}],
+                    }
+                    broker.save()
+                    st.success("Paper portfolio reset successfully!")
+                    st.rerun()
+            with col_r2:
+                if st.button("Reset Settings to Defaults", icon=":material/restart_alt:", width="stretch"):
+                    settings_manager.save_settings(settings_manager.DEFAULT_SETTINGS)
+                    st.success("Settings restored to factory defaults!")
+                    st.rerun()
 
