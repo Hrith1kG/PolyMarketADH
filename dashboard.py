@@ -31,27 +31,222 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Terminal dark-mode typography & metric card polish
+# Modern fintech-terminal theme: dark glass surfaces, cyan/violet accent gradient,
+# Inter for UI text and JetBrains Mono for numerics -- purely cosmetic, no logic changes.
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+    :root {
+        --bg-0: #05070C;
+        --bg-1: #0A0F1A;
+        --bg-2: #0F1520;
+        --surface: #10161F;
+        --surface-hover: #151C28;
+        --border: #1E2A3A;
+        --border-soft: #18212E;
+        --text-hi: #F1F5F9;
+        --text-mid: #94A3B8;
+        --text-low: #5B6B82;
+        --accent-cyan: #22D3EE;
+        --accent-violet: #8B5CF6;
+        --accent-green: #34D399;
+        --accent-red: #F87171;
+        --accent-amber: #FBBF24;
+        --grad-primary: linear-gradient(135deg, #22D3EE 0%, #6366F1 55%, #8B5CF6 100%);
+        --shadow-glow: 0 0 0 1px rgba(34, 211, 238, 0.08), 0 8px 24px -8px rgba(99, 102, 241, 0.25);
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .stApp {
+        background:
+            radial-gradient(1200px 600px at 12% -10%, rgba(99, 102, 241, 0.10), transparent 60%),
+            radial-gradient(900px 500px at 105% 10%, rgba(34, 211, 238, 0.08), transparent 55%),
+            var(--bg-0);
+    }
+
+    /* ---------- Scrollbar ---------- */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: var(--bg-0); }
+    ::-webkit-scrollbar-thumb { background: #263140; border-radius: 8px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent-violet); }
+
+    /* ---------- Sidebar ---------- */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+        border-right: 1px solid var(--border-soft);
+    }
+    section[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
+
+    /* ---------- Typography ---------- */
+    h1, h2, h3 { font-family: 'Inter', sans-serif; letter-spacing: -0.02em; color: var(--text-hi); }
+    h1 { font-weight: 800 !important; }
+    h2, h3 { font-weight: 700 !important; }
+    p, span, label, .stMarkdown { color: var(--text-mid); }
+    code, .stCodeBlock, .stCode { font-family: 'JetBrains Mono', monospace !important; }
+
+    /* ---------- Metric cards ---------- */
     div[data-testid="stMetric"] {
-        background: #111622;
-        border: 1px solid #1E293B;
-        border-radius: 8px;
-        padding: 12px 16px;
+        background: linear-gradient(160deg, var(--surface) 0%, var(--bg-1) 100%);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 18px;
+        box-shadow: var(--shadow-glow);
+        transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        border-color: rgba(139, 92, 246, 0.4);
     }
     div[data-testid="stMetricLabel"] p {
-        font-size: 0.78rem;
-        font-weight: 600;
+        font-size: 0.72rem;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.6px;
-        color: #94A3B8;
+        letter-spacing: 0.8px;
+        color: var(--text-low);
     }
     div[data-testid="stMetricValue"] {
-        font-size: 1.6rem;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1.55rem;
         font-weight: 700;
-        color: #F8FAFC;
+        color: var(--text-hi);
     }
+
+    /* ---------- Containers used as cards (st.container(border=True)) ---------- */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--surface);
+        border: 1px solid var(--border-soft) !important;
+        border-radius: 14px !important;
+        transition: border-color 0.15s ease;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+        border-color: var(--border);
+    }
+
+    /* ---------- Tabs ---------- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background: var(--bg-1);
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid var(--border-soft);
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 42px;
+        border-radius: 8px;
+        color: var(--text-mid);
+        font-weight: 600;
+        font-size: 0.88rem;
+        background: transparent;
+    }
+    .stTabs [aria-selected="true"] {
+        background: var(--grad-primary) !important;
+        color: #05070C !important;
+        box-shadow: 0 4px 14px -4px rgba(99, 102, 241, 0.55);
+    }
+
+    /* ---------- Buttons ---------- */
+    .stButton > button, .stFormSubmitButton > button {
+        border-radius: 9px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-hi);
+        font-weight: 600;
+        transition: all 0.15s ease;
+    }
+    .stButton > button:hover, .stFormSubmitButton > button:hover {
+        border-color: var(--accent-cyan);
+        color: var(--accent-cyan);
+        transform: translateY(-1px);
+    }
+    .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
+        background: var(--grad-primary);
+        border: none;
+        color: #05070C;
+    }
+    .stButton > button[kind="primary"]:hover, .stFormSubmitButton > button[kind="primary"]:hover {
+        filter: brightness(1.08);
+        color: #05070C;
+        box-shadow: 0 6px 18px -6px rgba(99, 102, 241, 0.6);
+    }
+
+    /* ---------- Badges / pills ---------- */
+    .stBadge, span[data-testid="stBadge"] { font-weight: 700 !important; letter-spacing: 0.3px; }
+
+    /* ---------- Inputs, selects, expanders ---------- */
+    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="base-input"] {
+        background: var(--bg-1) !important;
+        border-color: var(--border) !important;
+        border-radius: 8px !important;
+    }
+    .streamlit-expanderHeader, div[data-testid="stExpander"] {
+        background: var(--surface);
+        border: 1px solid var(--border-soft) !important;
+        border-radius: 10px !important;
+    }
+
+    /* ---------- Dataframes / tables ---------- */
+    div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    /* ---------- Dividers ---------- */
+    hr { border-color: var(--border-soft) !important; }
+
+    /* ---------- Alerts ---------- */
+    div[data-testid="stAlert"] { border-radius: 10px; border: 1px solid var(--border-soft); }
+
+    /* ---------- Hero header ---------- */
+    .sst-hero {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 14px;
+        padding: 22px 26px;
+        margin-bottom: 22px;
+        border-radius: 16px;
+        background: linear-gradient(120deg, rgba(34,211,238,0.07), rgba(139,92,246,0.09));
+        border: 1px solid var(--border-soft);
+        box-shadow: var(--shadow-glow);
+    }
+    .sst-hero-title {
+        font-size: 1.65rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        background: var(--grad-primary);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin: 0;
+    }
+    .sst-hero-sub {
+        color: var(--text-mid);
+        font-size: 0.86rem;
+        margin-top: 2px;
+    }
+    .sst-pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sst-pill {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg-1);
+        color: var(--text-mid);
+    }
+    .sst-pill-run { color: var(--accent-green); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.08); }
+    .sst-pill-pause { color: var(--accent-amber); border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08); }
+    .sst-pill-live { color: var(--accent-cyan); border-color: rgba(34, 211, 238, 0.35); background: rgba(34, 211, 238, 0.08); }
+    .sst-pill-paper { color: var(--text-mid); }
+    .sst-pill-danger { color: var(--accent-red); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.1); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -158,7 +353,14 @@ creds_ok, creds_msg = live_broker.check_credentials_available()
 # SIDEBAR: PRIMARY STRATEGY CONTROLS
 # ==========================================
 with st.sidebar:
-    st.markdown("### :material/tune: Control Panel")
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+        '<span style="font-size:1.3rem;">🎛️</span>'
+        '<span style="font-weight:800;font-size:1.15rem;letter-spacing:-0.01em;color:#F1F5F9;">Control Panel</span>'
+        '</div>'
+        '<div style="color:#5B6B82;font-size:0.78rem;margin-bottom:14px;">Runtime strategy &amp; risk controls</div>',
+        unsafe_allow_html=True,
+    )
 
     with st.container(border=True):
         st.caption("Engine Status & Mode")
@@ -355,8 +557,16 @@ with st.sidebar:
 # ==========================================
 # MAIN DASHBOARD TABS
 # ==========================================
-st.title(":material/bolt: Polymarket Sureshot Terminal")
-st.caption("Institutional-Grade Ultra-Probability Sports Moneyline Execution Engine")
+_status_pill = '<span class="sst-pill sst-pill-run">● RUNNING</span>' if status == "RUNNING" else '<span class="sst-pill sst-pill-pause">● PAUSED</span>'
+_mode_pill = '<span class="sst-pill sst-pill-live">◆ LIVE</span>' if is_live else '<span class="sst-pill sst-pill-paper">◆ PAPER</span>'
+_kill_pill = '<span class="sst-pill sst-pill-danger">⛔ KILL-SWITCH</span>' if kill_switch_active else ''
+_hero_html = (
+    '<div class="sst-hero"><div>'
+    '<div class="sst-hero-title">⚡ Polymarket Sureshot Terminal</div>'
+    '<div class="sst-hero-sub">Institutional-grade ultra-probability sports moneyline execution engine</div>'
+    '</div><div class="sst-pill-row">' + _status_pill + _mode_pill + _kill_pill + '</div></div>'
+)
+st.markdown(_hero_html, unsafe_allow_html=True)
 
 # Top Navigation Tabs matching user reference screenshots
 (
