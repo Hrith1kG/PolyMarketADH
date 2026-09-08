@@ -973,14 +973,6 @@ with tab_control:
     with st.expander("⚙️ Engine Controls (order limits & slippage)"):
         cp_col1, cp_col2 = st.columns(2)
         with cp_col1:
-            current_stake = float(settings.get("stake_per_trade", 25.0))
-            notional_input = st.number_input(
-                "Max Order Notional ($)", min_value=1.0, max_value=1000.0, value=current_stake, step=5.0,
-                help="Maximum USD stake per single trade order.",
-            )
-            if notional_input != current_stake:
-                settings_manager.update_setting("stake_per_trade", notional_input)
-
             current_max_pos = int(settings.get("max_open_positions", 10))
             max_pos_input = st.number_input("Max Open Positions", min_value=1, max_value=50, value=current_max_pos, step=1)
             if max_pos_input != current_max_pos:
