@@ -247,6 +247,36 @@ st.markdown("""
     .sst-pill-live { color: var(--accent-cyan); border-color: rgba(34, 211, 238, 0.35); background: rgba(34, 211, 238, 0.08); }
     .sst-pill-paper { color: var(--text-mid); }
     .sst-pill-danger { color: var(--accent-red); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.1); }
+
+    /* ---------- Persistent KPI ribbon ---------- */
+    .sst-kpi-row {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+        margin-bottom: 22px;
+    }
+    .sst-kpi {
+        background: var(--surface);
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 12px 16px;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .sst-kpi:hover { border-color: var(--border); transform: translateY(-1px); }
+    .sst-kpi-label {
+        font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.6px; color: var(--text-low); margin-bottom: 4px;
+    }
+    .sst-kpi-value {
+        font-family: 'JetBrains Mono', monospace; font-size: 1.28rem;
+        font-weight: 700; color: var(--text-hi);
+    }
+    .sst-kpi-pos { color: var(--accent-green) !important; }
+    .sst-kpi-neg { color: var(--accent-red) !important; }
+    @media (max-width: 1100px) { .sst-kpi-row { grid-template-columns: repeat(2, 1fr); } }
+
+    /* ---------- Section subtitle under st.header ---------- */
+    .sst-section-sub { color: var(--text-low); font-size: 0.85rem; margin-top: -8px; margin-bottom: 18px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -362,9 +392,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+    status = settings.get("bot_status", "RUNNING")
+
     with st.container(border=True):
-        st.caption("Engine Status & Mode")
-        status = settings.get("bot_status", "RUNNING")
+        st.markdown('<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#5B6B82;margin-bottom:8px;">⚡ Quick Actions</div>', unsafe_allow_html=True)
         col_sb_status, col_sb_mode = st.columns(2)
         with col_sb_status:
             if status == "RUNNING":
@@ -378,74 +409,94 @@ with st.sidebar:
                 st.badge("PAPER", icon=":material/description:", color="gray")
 
         st.write("")
-        if status == "RUNNING":
-            if st.button("Pause Bot", icon=":material/pause:"):
-                settings_manager.update_setting("bot_status", "PAUSED")
-                st.rerun()
-        else:
-            if st.button("Resume Bot", icon=":material/play_arrow:"):
-                settings_manager.update_setting("bot_status", "RUNNING")
+        col_sb_btn1, col_sb_btn2 = st.columns(2)
+        with col_sb_btn1:
+            if status == "RUNNING":
+                if st.button("Pause", icon=":material/pause:", use_container_width=True):
+                    settings_manager.update_setting("bot_status", "PAUSED")
+                    st.rerun()
+            else:
+                if st.button("Resume", icon=":material/play_arrow:", use_container_width=True, type="primary"):
+                    settings_manager.update_setting("bot_status", "RUNNING")
+                    st.rerun()
+        with col_sb_btn2:
+            if st.button("Scan", icon=":material/radar:", use_container_width=True, help="Trigger an immediate market scan"):
+                settings_manager.update_setting("manual_scan_requested", True)
+                with st.spinner("Scanning Polymarket sports markets..."):
+                    opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
+                    broker.save_signals(opps)
+                    broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
+                st.success(f"Scan complete! Found {len(opps)} signals.")
                 st.rerun()
 
-        if st.button("Trigger Scan Now", icon=":material/radar:"):
-            settings_manager.update_setting("manual_scan_requested", True)
-            with st.spinner("Scanning Polymarket sports markets..."):
-                opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
-                broker.save_signals(opps)
-                broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
-            st.success(f"Scan complete! Found {len(opps)} signals.")
+        st.write("")
+        if st.button("🚨 PANIC KILL-SWITCH", help="Immediately stops opening any new positions", use_container_width=True):
+            settings_manager.update_setting("entry_kill_switch", True)
+            st.error("PANIC KILL-SWITCH ACTIVATED! New orders blocked.")
             st.rerun()
 
+    st.write("")
 
-    # --- Settings Form ---
+    # --- Settings Form: grouped into tabs so related controls are one click away
+    # instead of one long scroll, while still saving together as a single config. ---
     with st.form("sidebar_config_form"):
-        st.subheader("Strategy & Limits")
-        poll_interval = st.number_input(
-            "Cooldown (seconds)",
-            min_value=10,
-            max_value=600,
-            value=int(settings.get("poll_interval_seconds", 60)),
-            step=5,
-            help="Polling interval cooldown between market scans.",
-        )
+        st.markdown('<div style="font-weight:700;font-size:0.95rem;color:#F1F5F9;margin-bottom:2px;">⚙️ Strategy Configuration</div>', unsafe_allow_html=True)
+        sb_tab_general, sb_tab_gates, sb_tab_risk, sb_tab_wallet = st.tabs(["General", "Gates", "Risk", "Wallet"])
 
-        st.markdown("**Health & Confidence Gates**")
-        req_healthy = st.checkbox(
-            "Require Healthy Data",
-            value=bool(settings.get("require_healthy_data", True)),
-        )
-        req_high_conf = st.checkbox(
-            "Require High Confidence Match",
-            value=bool(settings.get("require_high_confidence", False)),
-        )
+        with sb_tab_general:
+            poll_interval = st.number_input(
+                "Cooldown (seconds)",
+                min_value=10,
+                max_value=600,
+                value=int(settings.get("poll_interval_seconds", 60)),
+                step=5,
+                help="Polling interval cooldown between market scans.",
+            )
+            max_signals = st.number_input(
+                "Max Signals Per Scan",
+                min_value=1,
+                max_value=25,
+                value=int(settings.get("max_signals_per_scan", 5)),
+                step=1,
+            )
+            only_sports = st.checkbox(
+                "Focus Exclusively on Sports",
+                value=bool(settings.get("only_sports", True)),
+            )
+            only_moneyline = st.checkbox(
+                "Moneyline Matches Only",
+                value="moneyline" in settings.get("sports_market_types", ["moneyline"]),
+            )
 
-        st.markdown("**Late Game Settings**")
-        late_game_enabled = st.checkbox(
-            "Late Game Enabled",
-            value=bool(settings.get("late_game_enabled", False)),
-        )
-        req_auth_time = st.checkbox(
-            "Require Authoritative Time",
-            value=bool(settings.get("require_authoritative_time", False)),
-        )
-        late_game_threshold = st.number_input(
-            "Late Game Threshold (seconds)",
-            min_value=60,
-            max_value=3600,
-            value=int(settings.get("late_game_threshold_seconds", 600)),
-            step=30,
-        )
+        with sb_tab_gates:
+            st.markdown("**Health & Confidence**")
+            req_healthy = st.checkbox(
+                "Require Healthy Data",
+                value=bool(settings.get("require_healthy_data", True)),
+            )
+            req_high_conf = st.checkbox(
+                "Require High Confidence Match",
+                value=bool(settings.get("require_high_confidence", False)),
+            )
+            st.markdown("**Late Game**")
+            late_game_enabled = st.checkbox(
+                "Late Game Enabled",
+                value=bool(settings.get("late_game_enabled", False)),
+            )
+            req_auth_time = st.checkbox(
+                "Require Authoritative Time",
+                value=bool(settings.get("require_authoritative_time", False)),
+            )
+            late_game_threshold = st.number_input(
+                "Late Game Threshold (seconds)",
+                min_value=60,
+                max_value=3600,
+                value=int(settings.get("late_game_threshold_seconds", 600)),
+                step=30,
+            )
 
-        st.markdown("**👛 Wallet Tracking (Data API)**")
-        tracked_wallet = st.text_input(
-            "Polymarket / Proxy Address",
-            value=str(settings.get("tracked_wallet_address", "")),
-            placeholder="0x...",
-            help="Enter any Polymarket profile or proxy wallet address to track on-chain activity, trades, and PnL.",
-        )
-
-        with st.expander("⚙️ Advanced Risk & Threshold Settings", expanded=False):
-            st.markdown("**Probability & Odds Limits**")
+        with sb_tab_risk:
+            st.markdown("**Probability & Odds**")
             price_min = st.slider(
                 "Min Price (Entry Floor)",
                 min_value=0.85,
@@ -476,6 +527,7 @@ with st.sidebar:
                 value=float(settings.get("min_liquidity", 1000.0)),
                 step=250.0,
             )
+            st.markdown("**Position Sizing & Caps**")
             stake_per_trade = st.number_input(
                 "Stake Per Trade ($)",
                 min_value=1.0,
@@ -504,23 +556,18 @@ with st.sidebar:
                 value=int(settings.get("max_trades_per_day", 10)),
                 step=1,
             )
-            max_signals = st.number_input(
-                "Max Signals Per Scan",
-                min_value=1,
-                max_value=25,
-                value=int(settings.get("max_signals_per_scan", 5)),
-                step=1,
-            )
-            only_sports = st.checkbox(
-                "Focus Exclusively on Sports",
-                value=bool(settings.get("only_sports", True)),
-            )
-            only_moneyline = st.checkbox(
-                "Moneyline Matches Only",
-                value="moneyline" in settings.get("sports_market_types", ["moneyline"]),
+
+        with sb_tab_wallet:
+            st.markdown("**👛 Wallet Tracking (Data API)**")
+            tracked_wallet = st.text_input(
+                "Polymarket / Proxy Address",
+                value=str(settings.get("tracked_wallet_address", "")),
+                placeholder="0x...",
+                help="Enter any Polymarket profile or proxy wallet address to track on-chain activity, trades, and PnL.",
             )
 
-        saved = st.form_submit_button("💾 Save & Apply Config")
+        st.write("")
+        saved = st.form_submit_button("💾 Save & Apply Config", use_container_width=True, type="primary")
         if saved:
             updated_settings = {
                 "poll_interval_seconds": poll_interval,
@@ -547,12 +594,6 @@ with st.sidebar:
             st.success("Configuration saved and applied!")
             st.rerun()
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🚨 PANIC KILL-SWITCH", help="Immediately stops opening any new positions"):
-        settings_manager.update_setting("entry_kill_switch", True)
-        st.error("PANIC KILL-SWITCH ACTIVATED! New orders blocked.")
-        st.rerun()
-
 
 # ==========================================
 # MAIN DASHBOARD TABS
@@ -567,6 +608,20 @@ _hero_html = (
     '</div><div class="sst-pill-row">' + _status_pill + _mode_pill + _kill_pill + '</div></div>'
 )
 st.markdown(_hero_html, unsafe_allow_html=True)
+
+# Persistent KPI ribbon: the numbers that matter most, visible no matter which tab is open.
+_pnl_val = summary.get('realized_pnl', 0.0)
+_pnl_cls = 'sst-kpi-pos' if _pnl_val > 0 else ('sst-kpi-neg' if _pnl_val < 0 else '')
+_kpi_html = (
+    '<div class="sst-kpi-row">'
+    f'<div class="sst-kpi"><div class="sst-kpi-label">Balance</div><div class="sst-kpi-value">${summary.get("balance", 0.0):,.2f}</div></div>'
+    f'<div class="sst-kpi"><div class="sst-kpi-label">Open Positions</div><div class="sst-kpi-value">{summary.get("open_positions", 0)}</div></div>'
+    f'<div class="sst-kpi"><div class="sst-kpi-label">Open Exposure</div><div class="sst-kpi-value">${summary.get("open_exposure", 0.0):,.2f}</div></div>'
+    f'<div class="sst-kpi"><div class="sst-kpi-label">Realized P&amp;L</div><div class="sst-kpi-value {_pnl_cls}">${_pnl_val:+,.2f}</div></div>'
+    f'<div class="sst-kpi"><div class="sst-kpi-label">Win Rate</div><div class="sst-kpi-value">{summary.get("win_rate", 0.0):.1f}%</div></div>'
+    '</div>'
+)
+st.markdown(_kpi_html, unsafe_allow_html=True)
 
 # Top Navigation Tabs matching user reference screenshots
 (
@@ -591,6 +646,7 @@ st.markdown(_hero_html, unsafe_allow_html=True)
 # =============================================================
 with tab_exec:
     st.header("Order Management & Execution Pipeline")
+    st.markdown('<div class="sst-section-sub">Live order lifecycle, tracked positions, and mode across every account.</div>', unsafe_allow_html=True)
 
     lifecycle = summary.get("order_lifecycle", {})
     intentions_count = lifecycle.get("intentions", 0)
@@ -707,6 +763,7 @@ with tab_exec:
 # =============================================================
 with tab_ops:
     st.header("System Health & Operations")
+    st.markdown('<div class="sst-section-sub">Lifecycle state, circuit breakers, and safety gate enforcement.</div>', unsafe_allow_html=True)
 
     st.subheader("Lifecycle State")
     with st.container(horizontal=True):
@@ -773,6 +830,7 @@ with tab_ops:
 # =============================================================
 with tab_live:
     st.header("Live Trading Control")
+    st.markdown('<div class="sst-section-sub">Switch Paper ↔ Live, manage accounts, and set per-account risk independently.</div>', unsafe_allow_html=True)
     st.warning("These controls directly affect real capital on Polymarket mainnet.")
 
     st.subheader("Live Execution Readiness")
@@ -1200,6 +1258,7 @@ ACCOUNT_2_STAKE=15.0
 # =============================================================
 with tab_signals:
     st.header("Live Sureshot Sports Signals")
+    st.markdown('<div class="sst-section-sub">Opportunities passing your price, liquidity, and resolution-window filters right now.</div>', unsafe_allow_html=True)
     signals = state.get("signals", [])
 
     if not signals:
@@ -1335,6 +1394,7 @@ with tab_history:
     col_hdr, col_actions = st.columns([2.5, 1.5])
     with col_hdr:
         st.header("Trade History & On-Chain Activity")
+        st.markdown('<div class="sst-section-sub">Every order this bot has placed, plus any wallet\'s raw on-chain activity.</div>', unsafe_allow_html=True)
     with col_actions:
         btn_c1, btn_c2 = st.columns(2)
         with btn_c1:
@@ -1542,6 +1602,7 @@ with tab_history:
 # =============================================================
 with tab_perf:
     st.header("Performance Analytics")
+    st.markdown('<div class="sst-section-sub">Win rate, P&amp;L, and portfolio health for Paper or Live execution.</div>', unsafe_allow_html=True)
 
     # Select between Live On-Chain and Paper Simulation
     perf_options = ["Live Execution Portfolio (On-Chain)", "Paper Simulation Portfolio"]
