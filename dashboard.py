@@ -13,17 +13,19 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import config
-import importlib
-importlib.reload(config)
 import paper_broker
-importlib.reload(paper_broker)
 from paper_broker import PaperBroker
 import database
-importlib.reload(database)
 import live_broker
-importlib.reload(live_broker)
 import scanner
 import settings_manager
+
+# NOTE: modules are intentionally NOT importlib.reload()'d here. Streamlit already
+# re-executes this script top-to-bottom on every interaction; reloading every
+# imported module on top of that re-ran their setup code and wiped in-process
+# caches (e.g. database._SLUG_CACHE) on every single click. If you edit
+# config.py/paper_broker.py/database.py/live_broker.py/scanner.py while the
+# dashboard is running, restart `streamlit run dashboard.py` to pick up changes.
 
 st.set_page_config(
     page_title="Sureshot Terminal",
@@ -391,6 +393,55 @@ def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
         .configure_view(strokeWidth=0)
     )
     st.altair_chart(chart, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Cached read-only wrappers for expensive/network-bound calls.
+#
+# Streamlit executes the body of every st.tabs()/st.expander() block on every
+# script rerun regardless of which one is visually open -- so without caching,
+# a single click anywhere in the app re-fetches on-chain vitals/orders/positions
+# for every configured live account, plus re-queries the trades DB multiple
+# times, on every interaction. A short TTL keeps the dashboard responsive
+# without showing meaningfully stale data.
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_all_trades(broker_filter=None, account_filter=None):
+    return database.get_all_trades(broker_filter=broker_filter, account_filter=account_filter)
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_live_aggregated_vitals():
+    inst = live_broker.get_live_broker()
+    return inst.get_aggregated_vitals() if inst else None
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_live_open_orders(account_name=None):
+    inst = live_broker.get_live_broker()
+    return inst.get_open_orders(account_name=account_name) if inst else []
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_live_positions(account_name=None):
+    inst = live_broker.get_live_broker()
+    return inst.get_live_positions(account_name=account_name) if inst else []
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_live_collateral_balance(account_name=None):
+    inst = live_broker.get_live_broker()
+    return inst.get_collateral_balance(account_name=account_name) if inst else 0.0
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_account_vitals(account_name):
+    inst = live_broker.get_live_broker()
+    if not inst:
+        return None
+    session = inst.get_session(account_name)
+    return session.get_account_vitals() if session else None
 
 
 broker = get_broker()
@@ -770,10 +821,12 @@ with tab_overview:
                             st.caption(f"Settle {p.get('question')[:30]}...")
                             if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"ov_won_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=True, note="Manual settlement via Dashboard: WON")
+                                _cached_all_trades.clear()
                                 st.success("Settled as WON!")
                                 st.rerun()
                             if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"ov_lost_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=False, note="Manual settlement via Dashboard: LOST")
+                                _cached_all_trades.clear()
                                 st.warning("Settled as LOST.")
                                 st.rerun()
 
@@ -868,6 +921,7 @@ with tab_overview:
                                     else:
                                         st.error(f"Order failed for `{res['account_name']}`: {res['error']}")
                                 if any_success:
+                                    _cached_all_trades.clear()
                                     st.rerun()
                                 else:
                                     st.stop()
@@ -880,6 +934,7 @@ with tab_overview:
                     else:
                         pos, reason = broker.open_position(obj, stake=manual_stake, mode="PAPER")
                         if pos:
+                            _cached_all_trades.clear()
                             st.success(f"Successfully opened paper position on {obj.question[:40]} with ${manual_stake} stake!")
                             st.rerun()
                         else:
@@ -1074,9 +1129,9 @@ ACCOUNT_1_STAKE=25.0
             sel_acc = st.segmented_control("Select Account View", acc_filter_choices, default="Combined (All Accounts)", key="control_acc_select") or "Combined (All Accounts)"
 
             if sel_acc == "Combined (All Accounts)":
-                agg = live_instance.get_aggregated_vitals()
-                all_orders = live_instance.get_open_orders()
-                all_pos = live_instance.get_live_positions()
+                agg = _cached_live_aggregated_vitals()
+                all_orders = _cached_live_open_orders()
+                all_pos = _cached_live_positions()
 
                 with st.container(horizontal=True):
                     st.metric("Active Accounts", agg['account_count'], border=True)
@@ -1167,7 +1222,7 @@ ACCOUNT_1_STAKE=25.0
             else:
                 session = live_instance.get_session(sel_acc)
                 if session:
-                    vitals = session.get_account_vitals()
+                    vitals = _cached_account_vitals(sel_acc)
                     with st.container(horizontal=True):
                         st.metric("Connected Wallet", f"{vitals['wallet'][:6]}...{vitals['wallet'][-4:]}", help=vitals['wallet'], border=True)
                         st.metric("Wallet Type", vitals['wallet_type'], border=True)
@@ -1185,14 +1240,14 @@ ACCOUNT_1_STAKE=25.0
                         st.rerun()
 
                     st.markdown(f"##### Open CLOB Orders — `{vitals['name']}`")
-                    live_orders = session.get_open_orders()
+                    live_orders = _cached_live_open_orders(sel_acc)
                     if not live_orders:
                         st.info(f"No open CLOB limit orders for {vitals['name']}.")
                     else:
                         st.dataframe(pd.DataFrame(live_orders), hide_index=True)
 
                     st.markdown(f"##### On-Chain Positions — `{vitals['name']}`")
-                    live_pos = session.get_live_positions()
+                    live_pos = _cached_live_positions(sel_acc)
                     if not live_pos:
                         st.info(f"No open on-chain positions for {vitals['name']}.")
                     else:
@@ -1222,7 +1277,7 @@ with tab_history:
     default_perf = perf_options[0] if is_live else perf_options[1]
     perf_portfolio_view = st.segmented_control("Select Portfolio View", perf_options, default=default_perf, key="hist_perf_view") or default_perf
 
-    trades_list = database.get_all_trades()
+    trades_list = _cached_all_trades()
 
     if perf_portfolio_view == "Live Execution Portfolio (On-Chain)":
         live_inst = live_broker.get_live_broker()
@@ -1235,12 +1290,12 @@ with tab_history:
             target_acc = None if is_combined else selected_perf_acc
 
             with st.spinner("Fetching live on-chain account metrics..."):
-                live_bal = live_inst.get_collateral_balance(account_name=target_acc)
-                live_pos = live_inst.get_live_positions(account_name=target_acc)
-                live_orders = live_inst.get_open_orders(account_name=target_acc)
+                live_bal = _cached_live_collateral_balance(target_acc)
+                live_pos = _cached_live_positions(target_acc)
+                live_orders = _cached_live_open_orders(target_acc)
 
             live_exposure = sum(float(p.get("current_value", 0.0)) for p in live_pos)
-            live_trades = database.get_all_trades(broker_filter="live", account_filter=target_acc)
+            live_trades = _cached_all_trades(broker_filter="live", account_filter=target_acc)
             closed_live = [t for t in live_trades if "PENDING" not in str(t.get("result", "")).upper()]
             wins_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) > 0])
             realized_live = sum(float(t.get("pnl", 0.0)) for t in closed_live)
@@ -1291,6 +1346,7 @@ with tab_history:
         btn_c1, btn_c2 = st.columns(2)
         with btn_c1:
             if st.button("Refresh", icon=":material/refresh:", width="stretch", key="hist_refresh"):
+                _cached_all_trades.clear()
                 st.rerun()
         with btn_c2:
             if st.button("Settle Completed", icon=":material/done_all:", width="stretch", key="hist_settle"):
@@ -1300,6 +1356,7 @@ with tab_history:
                         st.success(f"Settled {len(settled)} completed trades in Local DB & credited balance!")
                     else:
                         st.info("No open trades are ready to settle automatically.")
+                _cached_all_trades.clear()
                 st.rerun()
 
     history_filter = st.segmented_control("Filter", ["ALL", "WON", "LOST"], default="ALL", key="hist_result_filter") or "ALL"
@@ -1328,10 +1385,12 @@ with tab_history:
                             st.caption(f"Settle {ot.get('question')[:30]}...")
                             if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"h_won_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=True, note="Manual settlement via Dashboard: WON")
+                                _cached_all_trades.clear()
                                 st.success("Settled as WON!")
                                 st.rerun()
                             if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"h_lost_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=False, note="Manual settlement via Dashboard: LOST")
+                                _cached_all_trades.clear()
                                 st.warning("Settled as LOST.")
                                 st.rerun()
 
@@ -1442,7 +1501,7 @@ with tab_collab:
         unsafe_allow_html=True,
     )
 
-    collab_trades = database.get_all_trades()
+    collab_trades = _cached_all_trades()
     closed_collab = [t for t in collab_trades if "PENDING" not in str(t.get("result", "")).upper()]
     wins_collab = len([t for t in closed_collab if float(t.get("pnl", 0.0)) > 0])
     losses_collab = len(closed_collab) - wins_collab

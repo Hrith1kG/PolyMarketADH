@@ -38,6 +38,9 @@ def resolve_market_slug(market_id: Optional[str] = None) -> str:
             return m.slug
     except Exception:
         pass
+    # Negative-cache: an unresolvable market_id would otherwise retry this network
+    # call every time it's looked up (e.g. once per dashboard rerun, per trade row).
+    _SLUG_CACHE[mid_str] = ""
     return ""
 
 

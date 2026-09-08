@@ -20,11 +20,19 @@ def _today_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+_synced_to_db = False  # sync_from_state is a one-time JSON->SQLite migration; running it on
+                       # every PaperBroker() (i.e. every Streamlit rerun) re-inserts every
+                       # trade and re-resolves any missing slug over the network each time.
+
+
 class PaperBroker:
     def __init__(self, state_path=None):
         self.state_path = state_path or config.STATE_FILE
         self.state = self._load()
-        database.sync_from_state(self.state)
+        global _synced_to_db
+        if not _synced_to_db:
+            database.sync_from_state(self.state)
+            _synced_to_db = True
 
     def _load(self) -> Dict[str, Any]:
         default_state: Dict[str, Any] = {
