@@ -88,20 +88,60 @@ class PaperBroker:
             return 0
         return dt.get("count", 0)
 
-    def can_open(self, stake: float) -> Tuple[bool, str]:
+    def positions_for_account(self, account_name: str) -> Dict[str, Any]:
+        """Positions belonging to one account only, for independent per-account risk scoping."""
+        return {k: p for k, p in self.state.get("positions", {}).items() if p.get("account_name") == account_name}
+
+    def _today_trades_count_for_account(self, account_name: str) -> int:
+        per_acc = self.state.setdefault("daily_trades_by_account", {})
+        dt = per_acc.get(account_name, {})
+        if dt.get("date") != _today_str():
+            dt = {"date": _today_str(), "count": 0}
+            per_acc[account_name] = dt
+            self.save()
+        return dt.get("count", 0)
+
+    def _increment_daily_trades_for_account(self, account_name: str):
+        per_acc = self.state.setdefault("daily_trades_by_account", {})
+        dt = per_acc.get(account_name, {})
+        if dt.get("date") != _today_str():
+            dt = {"date": _today_str(), "count": 0}
+        dt["count"] = dt.get("count", 0) + 1
+        per_acc[account_name] = dt
+
+    def can_open(
+        self,
+        stake: float,
+        account_name: Optional[str] = None,
+        limits: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
+        """Checks risk limits against either the whole portfolio, or (when account_name is
+        given) just that account's own positions/trades/exposure -- so accounts can run
+        independent risk budgets. `limits` overrides individual caps for that account;
+        any cap left out falls back to the global setting."""
         settings = settings_manager.load_settings()
-        max_positions = settings.get("max_open_positions", 10)
-        max_exposure = settings.get("max_total_exposure", 200.0)
-        max_daily_trades = settings.get("max_trades_per_day", 10)
+        limits = limits or {}
+        max_positions = limits.get("max_open_positions") or settings.get("max_open_positions", 10)
+        max_exposure = limits.get("max_total_exposure") or settings.get("max_total_exposure", 200.0)
+        max_daily_trades = limits.get("max_trades_per_day") or settings.get("max_trades_per_day", 10)
 
-        if self.today_trades_count >= max_daily_trades:
-            return False, f"max daily trades limit reached ({self.today_trades_count}/{max_daily_trades})"
+        if account_name:
+            scoped_positions = self.positions_for_account(account_name)
+            today_count = self._today_trades_count_for_account(account_name)
+            exposure = sum(p["stake"] for p in scoped_positions.values())
+        else:
+            scoped_positions = self.state["positions"]
+            today_count = self.today_trades_count
+            exposure = self.open_exposure
 
-        if len(self.state["positions"]) >= max_positions:
-            return False, f"max open positions reached ({len(self.state['positions'])}/{max_positions})"
+        if today_count >= max_daily_trades:
+            return False, f"max daily trades limit reached ({today_count}/{max_daily_trades})"
 
-        if self.open_exposure + stake > max_exposure:
-            return False, f"would exceed max exposure (${self.open_exposure + stake:.2f} > ${max_exposure:.2f})"
+        if len(scoped_positions) >= max_positions:
+            return False, f"max open positions reached ({len(scoped_positions)}/{max_positions})"
+
+        if exposure + stake > max_exposure:
+            return False, f"would exceed max exposure (${exposure + stake:.2f} > ${max_exposure:.2f})"
 
         if stake > self.state["balance"]:
             return False, f"insufficient balance (${self.state['balance']:.2f} < ${stake:.2f})"
@@ -125,13 +165,15 @@ class PaperBroker:
         mode: str = "PAPER",
         account_name: str = "Primary",
         wallet_address: Optional[str] = None,
+        limits: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> Tuple[Optional[Dict[str, Any]], str]:
         settings = settings_manager.load_settings()
         stake = stake if stake is not None else settings.get("stake_per_trade", 25.0)
 
         self.record_intention()
-        ok, reason = self.can_open(stake)
+        scope_account = account_name if mode.upper() == "LIVE" else None
+        ok, reason = self.can_open(stake, account_name=scope_account, limits=limits)
         if not ok:
             self.record_rejection()
             return None, reason
@@ -220,6 +262,9 @@ class PaperBroker:
             dt["count"] = 1
         else:
             dt["count"] += 1
+
+        if mode.upper() == "LIVE":
+            self._increment_daily_trades_for_account(account_name)
 
         self.add_log(f"OPENED [{mode.upper()}][{account_name}]: {opp.question[:45]} [{opp.outcome_label}] @ {opp.confirmed_price:.3f} stake=${stake:.2f}")
         self.save()

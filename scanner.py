@@ -42,13 +42,20 @@ def _within_resolution_window(end_dt: Optional[datetime], min_hours: float, max_
     return True
 
 
-def find_opportunities(held_token_ids: Optional[Set[str]] = None, max_pages: int = 25, page_size: int = 100) -> List[Opportunity]:
+def find_opportunities(
+    held_token_ids: Optional[Set[str]] = None,
+    max_pages: int = 25,
+    page_size: int = 100,
+    settings_override: Optional[Dict[str, Any]] = None,
+) -> List[Opportunity]:
     """Scans markets via the unified SDK applying runtime dashboard filters,
-    re-confirmed against the live CLOB order book and sorted by highest confirmed price."""
+    re-confirmed against the live CLOB order book and sorted by highest confirmed price.
+    Pass settings_override (e.g. a union of several accounts' thresholds) to scan a
+    broader net than the global settings in one pass."""
     held_token_ids = held_token_ids or set()
     opportunities = []
     client = polymarket_client.get_public_client()
-    settings = settings_manager.load_settings()
+    settings = settings_override or settings_manager.load_settings()
 
     price_min = settings.get("price_min", 0.97)
     price_max = settings.get("price_max", 0.995)

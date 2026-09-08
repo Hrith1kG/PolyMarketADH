@@ -33,6 +33,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_slippage": 0.005,       # 0.5% max price slippage
     "max_order_notional": 25.0,  # Max order size in USD
     "account_stakes": {},        # Dynamic per-account stake overrides: {"AccountName": 25.0}
+    "account_overrides": {},     # Per-account independent controls: {"AccountName": {key: value}}
     "bot_status": "RUNNING",     # "RUNNING" or "PAUSED"
     "manual_scan_requested": False,
     # Wallet Tracking (Data API)
@@ -107,4 +108,57 @@ def set_account_stake(account_name: str, stake: float) -> None:
     stakes = dict(settings.get("account_stakes", {}))
     stakes[account_name] = float(stake)
     settings["account_stakes"] = stakes
+    save_settings(settings)
+
+
+# Per-account settings that can independently diverge from the global defaults above,
+# so each configured trading account can run/pause and pursue its own strategy on its own risk budget.
+ACCOUNT_OVERRIDABLE_KEYS = [
+    "bot_status",              # "RUNNING" or "PAUSED" for this account only
+    "entry_kill_switch",       # blocks new entries for this account only
+    "max_open_positions",
+    "max_total_exposure",
+    "max_trades_per_day",
+    "price_min",
+    "price_max",
+    "min_volume",
+    "min_liquidity",
+    "sports_market_types",
+]
+
+
+def get_account_settings(account_name: str) -> Dict[str, Any]:
+    """Returns effective settings for one account: global settings overlaid with
+    that account's own overrides, so each account can be independently paused,
+    kill-switched, risk-capped, and strategy-filtered."""
+    settings = load_settings()
+    effective = {k: settings.get(k) for k in ACCOUNT_OVERRIDABLE_KEYS}
+    overrides = settings.get("account_overrides", {}).get(account_name, {})
+    for key, value in overrides.items():
+        if key in ACCOUNT_OVERRIDABLE_KEYS and value is not None:
+            effective[key] = value
+    return effective
+
+
+def set_account_override(account_name: str, key: str, value: Any) -> None:
+    """Sets a single per-account override, independent of the global setting."""
+    if key not in ACCOUNT_OVERRIDABLE_KEYS:
+        raise ValueError(f"'{key}' is not a per-account overridable setting.")
+    settings = load_settings()
+    overrides = dict(settings.get("account_overrides", {}))
+    acc_overrides = dict(overrides.get(account_name, {}))
+    acc_overrides[key] = value
+    overrides[account_name] = acc_overrides
+    settings["account_overrides"] = overrides
+    save_settings(settings)
+
+
+def clear_account_override(account_name: str, key: str) -> None:
+    """Removes a per-account override, reverting that key back to the global setting."""
+    settings = load_settings()
+    overrides = dict(settings.get("account_overrides", {}))
+    acc_overrides = dict(overrides.get(account_name, {}))
+    acc_overrides.pop(key, None)
+    overrides[account_name] = acc_overrides
+    settings["account_overrides"] = overrides
     save_settings(settings)

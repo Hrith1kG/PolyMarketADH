@@ -283,6 +283,45 @@ class LiveBroker:
 
         return results
 
+    def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float]) -> List[Dict[str, Any]]:
+        """Concurrently dispatches buy orders for only the given subset of accounts
+        (name -> stake). Used so accounts can independently opt in/out of an opportunity
+        (per their own pause/kill-switch/filters/limits) while still firing in parallel
+        for whichever accounts DO want it, avoiding inter-account slippage."""
+        sessions = [(name, self.sessions.get(name)) for name in account_stakes if self.sessions.get(name)]
+        results: List[Dict[str, Any]] = []
+        if not sessions:
+            return results
+        workers = min(len(sessions), 5)
+
+        def _execute_session(name: str, session: AccountSession, stake: float):
+            try:
+                resp = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
+                return {
+                    "account_name": name,
+                    "wallet": session.wallet,
+                    "stake": stake,
+                    "success": True,
+                    "response": resp,
+                    "error": None,
+                }
+            except Exception as exc:
+                return {
+                    "account_name": name,
+                    "wallet": session.wallet,
+                    "stake": stake,
+                    "success": False,
+                    "response": None,
+                    "error": str(exc),
+                }
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_execute_session, name, session, account_stakes[name]) for name, session in sessions]
+            for f in concurrent.futures.as_completed(futures):
+                results.append(f.result())
+
+        return results
+
     def redeem_winning_position(self, condition_id: Optional[str] = None, market_id: Optional[str] = None, account_name: Optional[str] = None) -> Any:
         """Redeems winning positions for a specific account or across all accounts."""
         if account_name:

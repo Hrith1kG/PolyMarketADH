@@ -777,6 +777,93 @@ ACCOUNT_2_STAKE=15.0
                                 st.success(f"Updated {acc_n} stake to ${new_val:.2f}!")
                                 st.rerun()
 
+                if len(agg["accounts"]) >= 1:
+                    st.markdown("##### 🎛️ Per-Account Independent Controls")
+                    st.caption("Each account can run, pause, kill-switch, risk-cap, and filter markets completely independently of the others and of the global bot controls.")
+                    pac_acc = st.selectbox("Configure Account", acc_names, key="pac_select")
+                    pac_settings = settings_manager.get_account_settings(pac_acc)
+                    pac_overrides = settings_manager.load_settings().get("account_overrides", {}).get(pac_acc, {})
+
+                    pac_col1, pac_col2 = st.columns(2)
+                    with pac_col1:
+                        pac_status = st.selectbox(
+                            "Status",
+                            ["RUNNING", "PAUSED"],
+                            index=0 if pac_settings.get("bot_status", "RUNNING") == "RUNNING" else 1,
+                            key=f"pac_status_{pac_acc}",
+                            help="Pauses new entries for this account only; other accounts keep trading.",
+                        )
+                        pac_kill = st.toggle(
+                            "Kill Switch",
+                            value=bool(pac_settings.get("entry_kill_switch", False)),
+                            key=f"pac_kill_{pac_acc}",
+                            help="Blocks all new entries for this account only.",
+                        )
+                        pac_max_pos = st.number_input(
+                            "Max Open Positions", min_value=1, max_value=200,
+                            value=int(pac_settings.get("max_open_positions") or 10),
+                            key=f"pac_maxpos_{pac_acc}",
+                        )
+                        pac_max_exp = st.number_input(
+                            "Max Total Exposure ($)", min_value=1.0,
+                            value=float(pac_settings.get("max_total_exposure") or 200.0),
+                            key=f"pac_maxexp_{pac_acc}",
+                        )
+                        pac_max_trades = st.number_input(
+                            "Max Trades / Day", min_value=1, max_value=500,
+                            value=int(pac_settings.get("max_trades_per_day") or 10),
+                            key=f"pac_maxtrades_{pac_acc}",
+                        )
+                    with pac_col2:
+                        pac_price_min, pac_price_max = st.slider(
+                            "Price Band",
+                            min_value=0.5, max_value=1.0,
+                            value=(float(pac_settings.get("price_min") or 0.97), float(pac_settings.get("price_max") or 0.995)),
+                            step=0.001, format="%.3f",
+                            key=f"pac_price_{pac_acc}",
+                        )
+                        pac_min_vol = st.number_input(
+                            "Min Volume ($)", min_value=0.0,
+                            value=float(pac_settings.get("min_volume") if pac_settings.get("min_volume") is not None else 5000.0),
+                            key=f"pac_minvol_{pac_acc}",
+                        )
+                        pac_min_liq = st.number_input(
+                            "Min Liquidity ($)", min_value=0.0,
+                            value=float(pac_settings.get("min_liquidity") if pac_settings.get("min_liquidity") is not None else 1000.0),
+                            key=f"pac_minliq_{pac_acc}",
+                        )
+                        pac_sports_types = st.multiselect(
+                            "Sports Market Types",
+                            ["moneyline", "spread", "totals"],
+                            default=pac_settings.get("sports_market_types") or ["moneyline"],
+                            key=f"pac_sports_{pac_acc}",
+                        )
+
+                    pac_apply_col, pac_reset_col = st.columns([1, 1])
+                    with pac_apply_col:
+                        if st.button(f"Apply Independent Settings for {pac_acc}", key=f"pac_apply_{pac_acc}", type="primary"):
+                            settings_manager.set_account_override(pac_acc, "bot_status", pac_status)
+                            settings_manager.set_account_override(pac_acc, "entry_kill_switch", pac_kill)
+                            settings_manager.set_account_override(pac_acc, "max_open_positions", int(pac_max_pos))
+                            settings_manager.set_account_override(pac_acc, "max_total_exposure", float(pac_max_exp))
+                            settings_manager.set_account_override(pac_acc, "max_trades_per_day", int(pac_max_trades))
+                            settings_manager.set_account_override(pac_acc, "price_min", float(pac_price_min))
+                            settings_manager.set_account_override(pac_acc, "price_max", float(pac_price_max))
+                            settings_manager.set_account_override(pac_acc, "min_volume", float(pac_min_vol))
+                            settings_manager.set_account_override(pac_acc, "min_liquidity", float(pac_min_liq))
+                            settings_manager.set_account_override(pac_acc, "sports_market_types", pac_sports_types)
+                            st.success(f"Independent settings applied for {pac_acc}.")
+                            st.rerun()
+                    with pac_reset_col:
+                        if pac_overrides and st.button(f"Reset {pac_acc} to Global Defaults", key=f"pac_reset_{pac_acc}"):
+                            for key in list(pac_overrides.keys()):
+                                settings_manager.clear_account_override(pac_acc, key)
+                            st.success(f"{pac_acc} reset to global defaults.")
+                            st.rerun()
+
+                    if pac_overrides:
+                        st.caption(f"⚡ {pac_acc} currently overrides: {', '.join(sorted(pac_overrides.keys()))}")
+
                 # Combined Open Orders
                 st.subheader("Open CLOB Orders (All Accounts)")
                 if not all_orders:
