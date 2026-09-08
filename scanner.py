@@ -71,6 +71,35 @@ def _orderbook_health_price(order_book: Any) -> Optional[float]:
     return best_ask
 
 
+def _late_game_ok(
+    game_start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    threshold_seconds: float,
+    require_authoritative_time: bool,
+) -> bool:
+    """"Late game" means the event is actually underway AND close to resolving --
+    not just that its resolution deadline happens to fall in some wide window.
+    Guards against entering a heavy favorite priced high before kickoff, or a
+    market resolving hours/days from now."""
+    if end_dt is None:
+        return False  # no resolution time to judge "imminent" against
+
+    now = datetime.now(timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+    if (end_dt - now).total_seconds() > threshold_seconds:
+        return False
+
+    if game_start_dt is None:
+        # No confirmed kickoff time for this game: only proceed on resolution
+        # proximity alone if we're not required to authoritatively confirm start.
+        return not require_authoritative_time
+
+    if game_start_dt.tzinfo is None:
+        game_start_dt = game_start_dt.replace(tzinfo=timezone.utc)
+    return game_start_dt <= now
+
+
 def find_opportunities(
     held_token_ids: Optional[Set[str]] = None,
     max_pages: int = 25,
@@ -99,6 +128,15 @@ def find_opportunities(
     sports_tag = settings.get("sports_tag_id", 100639)
     require_healthy_data = bool(settings.get("require_healthy_data", True))
 
+    late_game_enabled = bool(settings.get("late_game_enabled", False))
+    require_authoritative_time = bool(settings.get("require_authoritative_time", False))
+    late_game_threshold_seconds = float(settings.get("late_game_threshold_seconds", 600))
+    # The generic resolution-window floor (min_hours) measures time to the
+    # market's resolution deadline, which is a different thing from "the game
+    # is close to over" -- with Late Game on, the dedicated threshold below
+    # replaces that floor instead of stacking with it.
+    effective_min_hours = 0.0 if late_game_enabled else min_hours
+
     try:
         # Pass sports filters directly to the API when enabled
         query_params: Dict[str, Any] = {
@@ -125,8 +163,12 @@ def find_opportunities(
                         continue
                     if market.state.accepting_orders is False:
                         continue
-                    if not _within_resolution_window(market.state.end_date, min_hours, max_days):
+                    if not _within_resolution_window(market.state.end_date, effective_min_hours, max_days):
                         continue
+                    if late_game_enabled:
+                        game_start_dt = market.sports.game_start_time if market.sports else None
+                        if not _late_game_ok(game_start_dt, market.state.end_date, late_game_threshold_seconds, require_authoritative_time):
+                            continue
 
                 # Metrics checks
                 volume = float(market.metrics.volume or 0.0) if market.metrics else 0.0
