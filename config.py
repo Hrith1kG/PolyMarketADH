@@ -1,7 +1,10 @@
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+ENV_FILE = os.getenv("ENV_FILE", ".env")
 
 
 def _float(name, default):
@@ -116,4 +119,95 @@ def get_configured_accounts() -> list:
             })
 
     return accounts
+
+
+# --- Runtime account management (writes to .env so accounts persist across restarts) ---
+
+def _read_env_lines(path: str = None) -> list:
+    path = path or ENV_FILE
+    if not os.path.exists(path):
+        return []
+    with open(path, "r") as f:
+        return f.readlines()
+
+
+def _write_env_lines(lines: list, path: str = None) -> None:
+    path = path or ENV_FILE
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.writelines(lines)
+    os.replace(tmp, path)
+
+
+def _set_env_var(lines: list, key: str, value: str) -> list:
+    """Sets KEY=value in-place if present, otherwise appends it. Returns the updated lines."""
+    prefix = f"{key}="
+    for i, line in enumerate(lines):
+        if line.strip().startswith(prefix):
+            lines[i] = f"{key}={value}\n"
+            return lines
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(f"{key}={value}\n")
+    return lines
+
+
+def _next_account_slot(path: str = None) -> int:
+    used = set()
+    for line in _read_env_lines(path):
+        stripped = line.strip()
+        if stripped.startswith("ACCOUNT_") and "_PRIVATE_KEY=" in stripped:
+            try:
+                used.add(int(stripped.split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+    for i in range(1, 21):
+        if i not in used:
+            return i
+    raise ValueError("Maximum of 20 accounts already configured.")
+
+
+def add_account(
+    name: str,
+    private_key: str,
+    funder_address: str = "",
+    stake: Optional[float] = None,
+    relayer_api_key: str = "",
+    relayer_api_key_address: str = "",
+    path: str = None,
+) -> int:
+    """Adds a new numbered trading account by writing ACCOUNT_N_* entries to .env.
+    Returns the slot index it was assigned. Raises ValueError on invalid input."""
+    private_key = (private_key or "").strip()
+    if not private_key or "your_" in private_key.lower() or len(private_key) < 32:
+        raise ValueError("A valid private key is required (min 32 characters).")
+
+    idx = _next_account_slot(path)
+    lines = _read_env_lines(path)
+    lines = _set_env_var(lines, f"ACCOUNT_{idx}_NAME", (name or "").strip() or f"Account_{idx}")
+    lines = _set_env_var(lines, f"ACCOUNT_{idx}_PRIVATE_KEY", private_key)
+    lines = _set_env_var(lines, f"ACCOUNT_{idx}_FUNDER_ADDRESS", (funder_address or "").strip())
+    lines = _set_env_var(lines, f"ACCOUNT_{idx}_ENABLED", "true")
+    if stake is not None:
+        lines = _set_env_var(lines, f"ACCOUNT_{idx}_STAKE", str(stake))
+    if relayer_api_key:
+        lines = _set_env_var(lines, f"ACCOUNT_{idx}_RELAYER_API_KEY", relayer_api_key.strip())
+    if relayer_api_key_address:
+        lines = _set_env_var(lines, f"ACCOUNT_{idx}_RELAYER_API_KEY_ADDRESS", relayer_api_key_address.strip())
+    _write_env_lines(lines, path)
+    return idx
+
+
+def set_account_enabled(account_id: str, enabled: bool, path: str = None) -> None:
+    """Enables or disables a configured account without deleting its credentials."""
+    lines = _read_env_lines(path)
+    lines = _set_env_var(lines, f"ACCOUNT_{account_id}_ENABLED", "true" if enabled else "false")
+    _write_env_lines(lines, path)
+
+
+def remove_account(account_id: str, path: str = None) -> None:
+    """Permanently removes a configured account's entries (including its private key) from .env."""
+    prefix = f"ACCOUNT_{account_id}_"
+    lines = [l for l in _read_env_lines(path) if not l.strip().startswith(prefix)]
+    _write_env_lines(lines, path)
 

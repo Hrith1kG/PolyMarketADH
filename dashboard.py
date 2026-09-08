@@ -695,10 +695,69 @@ with tab_live:
 
     st.subheader("Live Accounts & Orders")
 
+    with st.expander("➕ Add / Manage Trading Accounts", expanded=not creds_ok):
+        st.caption("Add additional Polymarket wallets to trade from. Credentials are written to your local `.env` file only and are never sent anywhere else.")
+
+        configured_accounts = config.get_configured_accounts()
+        if configured_accounts:
+            st.markdown("**Configured Accounts**")
+            for acc in configured_accounts:
+                mc1, mc2, mc3, mc4, mc5 = st.columns([2, 3, 1.2, 1, 1])
+                with mc1:
+                    st.text(acc["name"])
+                with mc2:
+                    st.text(acc.get("funder_address") or "(derived from key)")
+                with mc3:
+                    st.text("🟢 Enabled" if acc.get("enabled", True) else "⚪ Disabled")
+                with mc4:
+                    toggle_label = "Disable" if acc.get("enabled", True) else "Enable"
+                    if st.button(toggle_label, key=f"toggle_acc_{acc['id']}"):
+                        config.set_account_enabled(acc["id"], not acc.get("enabled", True))
+                        st.rerun()
+                with mc5:
+                    confirm_key = f"confirm_remove_{acc['id']}"
+                    if st.session_state.get(confirm_key):
+                        if st.button("Confirm?", key=f"confirm_btn_{acc['id']}", type="primary"):
+                            config.remove_account(acc["id"])
+                            st.session_state.pop(confirm_key, None)
+                            st.success(f"Removed {acc['name']}.")
+                            st.rerun()
+                    else:
+                        if st.button("Remove", key=f"remove_acc_{acc['id']}"):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+            st.divider()
+        else:
+            st.info("No trading accounts configured yet. Add one below to enable live trading.")
+
+        st.markdown("**Add New Account**")
+        with st.form("add_account_form", clear_on_submit=True):
+            new_name = st.text_input("Account Name", placeholder="e.g. Secondary_Safe")
+            new_pk = st.text_input("Private Key", type="password", placeholder="0x...")
+            new_funder = st.text_input("Funder / Proxy Wallet Address (optional)", placeholder="0x...")
+            new_stake = st.number_input(
+                "Stake Per Trade ($, optional override)",
+                min_value=0.0, value=0.0, step=5.0,
+                help="Leave at 0 to use the global stake-per-trade setting for this account.",
+            )
+            submitted = st.form_submit_button("Add Account", type="primary")
+            if submitted:
+                try:
+                    idx = config.add_account(
+                        name=new_name,
+                        private_key=new_pk,
+                        funder_address=new_funder,
+                        stake=new_stake if new_stake > 0 else None,
+                    )
+                    st.success(f"Account added (slot {idx}). Refreshing...")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
     if not creds_ok:
         st.info("""
 Live data will populate here when LIVE mode is running and readiness is READY.
-To activate live trading, add your Polymarket account credentials to your `.env` file:
+Add a trading account above, or add credentials directly to your `.env` file:
 ```bash
 # Single-Account format:
 PRIVATE_KEY=0x_your_wallet_private_key
