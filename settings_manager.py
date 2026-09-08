@@ -31,7 +31,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "live_trading": False,
     "entry_kill_switch": False,  # Blocks new trade entries when True
     "max_slippage": 0.005,       # 0.5% max price slippage
-    "max_order_notional": 25.0,  # Max order size in USD
     "account_stakes": {},        # Dynamic per-account stake overrides: {"AccountName": 25.0}
     "account_overrides": {},     # Per-account independent controls: {"AccountName": {key: value}}
     "bot_status": "RUNNING",     # "RUNNING" or "PAUSED"
