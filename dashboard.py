@@ -768,11 +768,11 @@ with tab_overview:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                         with pop:
                             st.caption(f"Settle {p.get('question')[:30]}...")
-                            if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"ov_won_{tid[:10]}", width="stretch"):
+                            if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"ov_won_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=True, note="Manual settlement via Dashboard: WON")
                                 st.success("Settled as WON!")
                                 st.rerun()
-                            if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"ov_lost_{tid[:10]}", width="stretch"):
+                            if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"ov_lost_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=False, note="Manual settlement via Dashboard: LOST")
                                 st.warning("Settled as LOST.")
                                 st.rerun()
@@ -1319,10 +1319,11 @@ with tab_history:
         if open_trades:
             with st.expander(f"⚡ Active Open Trades ({len(open_trades)} active)", expanded=False):
                 st.caption("Inspect live odds on Polymarket or immediately settle completed matches:")
-                for ot in open_trades:
+                for ot_idx, ot in enumerate(open_trades):
                     ot_slug = ot.get("slug") or database.resolve_market_slug(ot.get("market_id"))
                     ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
                     ot_tok = ot.get("token_id")
+                    ot_key = f"{ot_idx}_{ot.get('trade_id') or ot_tok}"
                     acc_tag = f"[{ot.get('account_name', 'Primary')}] " if ot.get("account_name") else ""
                     o_c1, o_c2, o_c3 = st.columns([2.5, 1.1, 1.0])
                     with o_c1:
@@ -1333,11 +1334,11 @@ with tab_history:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                         with pop:
                             st.caption(f"Settle {ot.get('question')[:30]}...")
-                            if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"h_won_{str(ot_tok)[:10]}", width="stretch"):
+                            if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"h_won_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=True, note="Manual settlement via Dashboard: WON")
                                 st.success("Settled as WON!")
                                 st.rerun()
-                            if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"h_lost_{str(ot_tok)[:10]}", width="stretch"):
+                            if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"h_lost_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=False, note="Manual settlement via Dashboard: LOST")
                                 st.warning("Settled as LOST.")
                                 st.rerun()
