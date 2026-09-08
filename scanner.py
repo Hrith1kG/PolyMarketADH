@@ -42,6 +42,35 @@ def _within_resolution_window(end_dt: Optional[datetime], min_hours: float, max_
     return True
 
 
+# "Require Healthy Data" thresholds: a single stale trade can leave a thin market
+# showing e.g. 0.98 with no one actually willing to trade there. A two-sided book
+# with a tight spread and a fresh quote is what tells us that price is real.
+HEALTH_MAX_SPREAD = 0.03
+HEALTH_MAX_QUOTE_AGE_SECONDS = 120
+
+
+def _orderbook_health_price(order_book: Any) -> Optional[float]:
+    """Returns the live best-ask price if this token's CLOB order book looks
+    healthy (two-sided, tight spread, fresh quote); otherwise None."""
+    if not order_book.bids or not order_book.asks:
+        return None
+
+    best_bid = float(order_book.bids[-1].price)
+    best_ask = float(order_book.asks[-1].price)
+    if (best_ask - best_bid) > HEALTH_MAX_SPREAD:
+        return None
+
+    if order_book.timestamp is not None:
+        ts = order_book.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age_seconds > HEALTH_MAX_QUOTE_AGE_SECONDS:
+            return None
+
+    return best_ask
+
+
 def find_opportunities(
     held_token_ids: Optional[Set[str]] = None,
     max_pages: int = 25,
@@ -68,6 +97,7 @@ def find_opportunities(
     only_sports = settings.get("only_sports", True)
     sports_types = settings.get("sports_market_types", ["moneyline"])
     sports_tag = settings.get("sports_tag_id", 100639)
+    require_healthy_data = bool(settings.get("require_healthy_data", True))
 
     try:
         # Pass sports filters directly to the API when enabled
@@ -123,15 +153,26 @@ def find_opportunities(
                     if not (price_min <= gamma_price <= price_max):
                         continue
 
-                    # Re-confirm against live CLOB book
-                    try:
-                        confirmed_dec = client.get_price(token_id=token_id_str, side="BUY")
-                    except (RateLimitError, PolymarketError):
-                        continue
+                    # Re-confirm against the live CLOB book. With "Require Healthy
+                    # Data" on, pull the actual order book so we can also verify
+                    # it's a live, tight, two-sided quote -- not just one stale print.
+                    if require_healthy_data:
+                        try:
+                            order_book = client.get_order_book(token_id=token_id_str)
+                        except (RateLimitError, PolymarketError):
+                            continue
+                        confirmed_price = _orderbook_health_price(order_book)
+                        if confirmed_price is None:
+                            continue
+                    else:
+                        try:
+                            confirmed_dec = client.get_price(token_id=token_id_str, side="BUY")
+                        except (RateLimitError, PolymarketError):
+                            continue
+                        if confirmed_dec is None:
+                            continue
+                        confirmed_price = float(confirmed_dec)
 
-                    if confirmed_dec is None:
-                        continue
-                    confirmed_price = float(confirmed_dec)
                     if not (price_min <= confirmed_price <= price_max):
                         continue
 
