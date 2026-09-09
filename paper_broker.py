@@ -344,6 +344,24 @@ class PaperBroker:
         self.save()
         return trade
 
+    def exit_position(self, token_id_or_key: str, exit_price: float, note: str = "") -> Optional[Dict[str, Any]]:
+        """Manually exits/sells an open position at a specified exit price, booking P&L and updating SQLite DB."""
+        positions = self.state.get("positions", {})
+        target_key = None
+        if token_id_or_key in positions:
+            target_key = token_id_or_key
+        else:
+            for k, p in positions.items():
+                if str(p.get("token_id")) == str(token_id_or_key) or str(p.get("trade_id")) == str(token_id_or_key):
+                    target_key = k
+                    break
+        if not target_key:
+            return None
+        settle_note = note or f"Manual exit @ ${exit_price:.4f}"
+        trade = self._close_position(target_key, float(exit_price), settle_note)
+        self.save()
+        return trade
+
     def check_resolutions(self) -> List[Dict[str, Any]]:
         """Looks up each open position's market via the unified SDK or end_date elapsed checks;
         if closed or resolved, settles the position at the resolved price and books P&L."""

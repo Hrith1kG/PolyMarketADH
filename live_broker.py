@@ -1,6 +1,7 @@
 """Real order execution, account vitals tracking, and CTF position redemption
 via Polymarket's official polymarket-client SDK across single or multiple accounts."""
 import concurrent.futures
+import math
 from typing import Dict, Any, List, Optional, Tuple
 import config
 import polymarket_client
@@ -133,7 +134,10 @@ class AccountSession:
     def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None) -> Any:
         """Places a limit buy for stake_usd shares at `price`."""
         stake = stake_usd if stake_usd is not None else settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE)
-        size = round(stake / price, 2)
+        # Ensure ceiling rounding and min notional >= 1.00 USD so Polymarket's min size check never fails
+        size = math.ceil((float(stake) / float(price)) * 100.0) / 100.0
+        if size * float(price) < 1.0:
+            size = math.ceil((1.00 / float(price)) * 100.0) / 100.0
         try:
             response = self.client.place_limit_order(
                 token_id=token_id,
@@ -144,6 +148,22 @@ class AccountSession:
             return response
         except Exception as exc:
             raise LiveBrokerError(f"[{self.name}] Failed to place order: {exc}")
+
+    def place_sell(self, token_id: str, price: float, size: float) -> Any:
+        """Places a limit sell order for `size` shares at `price` to exit an open position."""
+        size_to_sell = math.floor(float(size) * 100.0) / 100.0
+        if size_to_sell <= 0:
+            raise LiveBrokerError(f"[{self.name}] Invalid sell size: {size}")
+        try:
+            response = self.client.place_limit_order(
+                token_id=token_id,
+                price=price,
+                size=size_to_sell,
+                side="SELL",
+            )
+            return response
+        except Exception as exc:
+            raise LiveBrokerError(f"[{self.name}] Failed to place sell order: {exc}")
 
     def redeem_winning_position(self, condition_id: Optional[str] = None, market_id: Optional[str] = None) -> Any:
         """Redeems resolved winning outcome tokens on CTF contract back to collateral."""
@@ -248,14 +268,18 @@ class LiveBroker:
         """Places a buy on the primary account (for backward compatibility)."""
         return self.primary_session.place_buy(token_id=token_id, price=price, stake_usd=stake_usd)
 
-    def place_buy_all(self, token_id: str, price: float, default_stake: float = 25.0) -> List[Dict[str, Any]]:
+    def place_buy_all(self, token_id: str, price: float, default_stake: float = 25.0, override_stake: Optional[float] = None) -> List[Dict[str, Any]]:
         """Concurrently dispatches buy orders across all active accounts using a ThreadPool.
-        Guarantees parallel execution to eliminate slippage between accounts."""
+        Guarantees parallel execution to eliminate slippage between accounts.
+        If override_stake is provided (e.g. from manual dashboard triggers), it takes precedence."""
         results = []
         workers = min(len(self.account_list), 5)
 
         def _execute_session(session: AccountSession):
-            stake = settings_manager.get_account_stake(session.name, fallback=session.custom_stake or default_stake)
+            if override_stake is not None:
+                stake = float(override_stake)
+            else:
+                stake = settings_manager.get_account_stake(session.name, fallback=session.custom_stake or default_stake)
             try:
                 resp = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
                 return {
@@ -282,6 +306,13 @@ class LiveBroker:
                 results.append(f.result())
 
         return results
+
+    def exit_position(self, account_name: str, token_id: str, size: float, price: float) -> Any:
+        """Dispatches a sell order to exit an open position on Polymarket CLOB for the given account."""
+        session = self.sessions.get(account_name) or self.primary_session
+        if not session:
+            raise LiveBrokerError(f"No active session found for account '{account_name}'")
+        return session.place_sell(token_id=token_id, price=price, size=size)
 
     def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float]) -> List[Dict[str, Any]]:
         """Concurrently dispatches buy orders for only the given subset of accounts

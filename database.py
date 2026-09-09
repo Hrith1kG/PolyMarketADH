@@ -266,6 +266,33 @@ def force_settle_orphaned_trade(trade_id: str, won: bool, note: str = "", db_pat
     )
 
 
+def exit_orphaned_trade(trade_id: str, exit_price: float, note: str = "", db_path: str = DB_FILE) -> bool:
+    """Settles a PENDING trade directly in SQLite using a specified exit_price,
+    booking actual P&L."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        row = conn.execute("SELECT * FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+    if not row:
+        return False
+    trade = dict(row)
+    resolved_price = float(exit_price)
+    tokens = float(trade.get("tokens") or 0.0)
+    cost = float(trade.get("cost") or 0.0)
+    payout = tokens * resolved_price
+    pnl = payout - cost
+    return settle_trade(
+        token_id=str(trade.get("token_id") or ""),
+        trade_id=trade_id,
+        resolved_price=resolved_price,
+        payout=payout,
+        pnl=pnl,
+        result="WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN"),
+        closed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        note=note or f"Manual exit @ ${resolved_price:.4f}",
+        db_path=db_path,
+    )
+
+
 def get_available_outcomes(db_path: str = DB_FILE) -> List[str]:
     init_db(db_path)
     with get_connection(db_path) as conn:

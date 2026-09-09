@@ -277,6 +277,22 @@ def get_broker() -> PaperBroker:
     return PaperBroker()
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def get_live_token_best_bid(token_id: str) -> Optional[float]:
+    """Queries top bid price from live CLOB orderbook for an outcome token."""
+    if not token_id:
+        return None
+    try:
+        import polymarket_client
+        client = polymarket_client.get_public_client()
+        ob = client.get_order_book(token_id=str(token_id))
+        if ob and ob.bids:
+            return float(ob.bids[0].price)
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_on_chain_wallet_data(address: str):
     """Queries Polymarket's official Data API for an arbitrary wallet address.
@@ -827,17 +843,72 @@ with tab_overview:
                 },
                 hide_index=True,
             )
-            with st.expander("🔍 1-Click Verification & Settlement"):
+            with st.expander("🔍 1-Click Verification, Exit & Settlement"):
                 for tid, p in list(positions.items()):
                     slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
                     poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
-                    qc1, qc2, qc3 = st.columns([2.5, 1.1, 1.0])
+                    qc1, qc2, qc3, qc4 = st.columns([2.2, 0.8, 0.8, 0.8])
                     with qc1:
                         acc_lbl = f"[{p.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if p.get("account_name") else ""
                         st.markdown(f"**{acc_lbl}{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
                     with qc2:
-                        st.link_button("Open Market", poly_url, icon=":material/open_in_new:", width="stretch")
+                        st.link_button("Market", poly_url, icon=":material/open_in_new:", width="stretch")
                     with qc3:
+                        exit_pop = st.popover("Exit", icon=":material/logout:", width="stretch")
+                        with exit_pop:
+                            st.markdown(f"**Exit: {p.get('outcome_label', '')}**")
+                            token_id_str = str(p.get("token_id", tid))
+                            shares_held = float(p.get("shares") or (p.get("stake", 1.0) / max(0.01, p.get("entry_price", 0.95))))
+                            entry_p = float(p.get("entry_price", 0.95))
+                            invested = float(p.get("stake", 1.0))
+                            pos_mode = str(p.get("mode", execution_mode_str)).upper()
+                            pos_acc = p.get("account_name", config.DEFAULT_ACCOUNT_NAME)
+
+                            live_bid = get_live_token_best_bid(token_id_str)
+                            default_exit = live_bid if (live_bid and live_bid > 0.0) else entry_p
+
+                            st.caption(f"Tokens: `{shares_held:.2f}` | Entry: `${entry_p:.4f}`")
+                            if live_bid:
+                                st.info(f"Live Best Bid on CLOB: **${live_bid:.4f}**")
+                            else:
+                                st.caption("No immediate bids in book; using entry price.")
+
+                            exit_p = st.number_input(
+                                "Exit Price ($)",
+                                min_value=0.01,
+                                max_value=1.00,
+                                value=float(default_exit),
+                                step=0.01,
+                                key=f"ov_exit_p_{tid}",
+                            )
+                            est_return = shares_held * exit_p
+                            est_pnl = est_return - invested
+                            pnl_pct = (est_pnl / invested * 100.0) if invested > 0 else 0.0
+                            pnl_color = "green" if est_pnl >= 0 else "red"
+                            st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
+
+                            exit_btn_label = "Sell on CLOB" if pos_mode == "LIVE" else "Close Paper"
+                            if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"ov_btn_exit_{tid}", width="stretch"):
+                                if pos_mode == "LIVE":
+                                    live_inst = live_broker.get_live_broker()
+                                    if not live_inst:
+                                        st.error("Live broker not ready.")
+                                        st.stop()
+                                    try:
+                                        with st.spinner(f"Submitting sell order on CLOB for {pos_acc}..."):
+                                            live_inst.exit_position(pos_acc, token_id_str, size=shares_held, price=exit_p)
+                                        broker.exit_position(tid, exit_price=exit_p, note=f"Manual Live Exit via Dashboard @ ${exit_p:.4f}")
+                                        _cached_all_trades.clear()
+                                        st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
+                                        st.rerun()
+                                    except Exception as ex:
+                                        st.error(f"Failed to exit on-chain: {ex}")
+                                else:
+                                    broker.exit_position(tid, exit_price=exit_p, note=f"Manual Paper Exit via Dashboard @ ${exit_p:.4f}")
+                                    _cached_all_trades.clear()
+                                    st.success(f"Closed paper trade! PnL: ${est_pnl:+.2f}")
+                                    st.rerun()
+                    with qc4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                         with pop:
                             st.caption(f"Settle {p.get('question')[:30]}...")
@@ -927,7 +998,7 @@ with tab_overview:
                         live_inst = live_broker.get_live_broker()
                         if live_inst:
                             try:
-                                results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, default_stake=manual_stake)
+                                results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, override_stake=manual_stake)
                                 any_success = False
                                 for res in results:
                                     if res["success"]:
@@ -1440,13 +1511,68 @@ with tab_history:
                     ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
                     ot_tok = ot.get("token_id")
                     ot_key = f"{ot_idx}_{ot.get('trade_id') or ot_tok}"
-                    acc_tag = f"[{ot.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if ot.get("account_name") else ""
-                    o_c1, o_c2, o_c3 = st.columns([2.5, 1.1, 1.0])
+                    o_c1, o_c2, o_c3, o_c4 = st.columns([2.2, 0.8, 0.8, 0.8])
                     with o_c1:
                         st.markdown(f"**{acc_tag}{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
                     with o_c2:
-                        st.link_button("Open Market", ot_url, icon=":material/open_in_new:", width="stretch")
+                        st.link_button("Market", ot_url, icon=":material/open_in_new:", width="stretch")
                     with o_c3:
+                        h_exit_pop = st.popover("Exit", icon=":material/logout:", width="stretch")
+                        with h_exit_pop:
+                            st.markdown(f"**Exit: {ot.get('outcome', '')}**")
+                            ot_tok_str = str(ot_tok)
+                            ot_tokens = float(ot.get("tokens") or 0.0)
+                            ot_cost = float(ot.get("cost") or 0.0)
+                            ot_entry = float(ot.get("entry_price") or 0.0)
+                            ot_acc = ot.get("account_name", config.DEFAULT_ACCOUNT_NAME)
+                            ot_broker = str(ot.get("broker", "paper")).lower()
+
+                            live_bid = get_live_token_best_bid(ot_tok_str)
+                            default_exit = live_bid if (live_bid and live_bid > 0.0) else (ot_entry or 0.95)
+                            st.caption(f"Tokens: `{ot_tokens:.2f}` | Entry: `${ot_entry:.4f}`")
+                            if live_bid:
+                                st.info(f"Live Best Bid on CLOB: **${live_bid:.4f}**")
+                            else:
+                                st.caption("No immediate bids in book; using entry price.")
+
+                            exit_p = st.number_input(
+                                "Exit Price ($)",
+                                min_value=0.01,
+                                max_value=1.00,
+                                value=float(default_exit),
+                                step=0.01,
+                                key=f"h_exit_p_{ot_key}",
+                            )
+                            est_return = ot_tokens * exit_p
+                            est_pnl = est_return - ot_cost
+                            pnl_pct = (est_pnl / ot_cost * 100.0) if ot_cost > 0 else 0.0
+                            pnl_color = "green" if est_pnl >= 0 else "red"
+                            st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
+
+                            exit_btn_label = "Sell on CLOB" if ot_broker == "live" else "Close Paper"
+                            if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"h_btn_exit_{ot_key}", width="stretch"):
+                                if ot_broker == "live":
+                                    live_inst = live_broker.get_live_broker()
+                                    if not live_inst:
+                                        st.error("Live broker not ready.")
+                                        st.stop()
+                                    try:
+                                        with st.spinner(f"Submitting sell order on CLOB for {ot_acc}..."):
+                                            live_inst.exit_position(ot_acc, ot_tok_str, size=ot_tokens, price=exit_p)
+                                        broker.exit_position(ot_tok, exit_price=exit_p, note=f"Manual Live Exit via History @ ${exit_p:.4f}")
+                                        database.exit_orphaned_trade(ot.get("trade_id"), exit_price=exit_p, note=f"Manual Live Exit @ ${exit_p:.4f}")
+                                        _cached_all_trades.clear()
+                                        st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
+                                        st.rerun()
+                                    except Exception as ex:
+                                        st.error(f"Failed to exit on-chain: {ex}")
+                                else:
+                                    broker.exit_position(ot_tok, exit_price=exit_p, note=f"Manual Paper Exit via History @ ${exit_p:.4f}")
+                                    database.exit_orphaned_trade(ot.get("trade_id"), exit_price=exit_p, note=f"Manual Paper Exit @ ${exit_p:.4f}")
+                                    _cached_all_trades.clear()
+                                    st.success(f"Closed trade! PnL: ${est_pnl:+.2f}")
+                                    st.rerun()
+                    with o_c4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
                         with pop:
                             st.caption(f"Settle {ot.get('question')[:30]}...")
