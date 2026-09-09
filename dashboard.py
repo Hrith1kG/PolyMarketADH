@@ -761,11 +761,38 @@ def build_gates_data():
 with tab_overview:
     lifecycle = summary.get("order_lifecycle", {})
     reserved_capital = summary.get("reserved_capital", summary.get("open_exposure", 0.0))
-    # Scoped to the active mode to match summary() above -- otherwise this table would
-    # show PAPER positions while the KPI ribbon above it reports LIVE-only numbers (or
-    # vice versa).
+    # Merge positions from state.json and pending trades from trades.db so nothing is missed
+    all_known_positions = dict(state.get("positions", {}))
+    try:
+        db_pending = [t for t in database.get_all_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
+        existing_tokens = {str(p.get("token_id")) for p in all_known_positions.values()}
+        for pt in db_pending:
+            pt_tok = str(pt.get("token_id", ""))
+            if pt_tok and pt_tok not in existing_tokens:
+                pos_k = f"{pt.get('account_name', 'acc')}_{pt_tok}"
+                all_known_positions[pos_k] = {
+                    "trade_id": pt.get("trade_id"),
+                    "mode": str(pt.get("broker", pt.get("mode", "paper"))).upper(),
+                    "account_name": pt.get("account_name", config.DEFAULT_ACCOUNT_NAME),
+                    "wallet_address": pt.get("wallet_address", ""),
+                    "token_id": pt_tok,
+                    "market_id": pt.get("market_id"),
+                    "slug": pt.get("slug", ""),
+                    "question": pt.get("question", ""),
+                    "outcome_label": pt.get("outcome_label") or pt.get("outcome", ""),
+                    "entry_price": float(pt.get("entry_price", 0.0) or 0.0),
+                    "shares": float(pt.get("tokens", pt.get("shares", 0.0)) or 0.0),
+                    "stake": float(pt.get("cost", pt.get("stake", 0.0)) or 0.0),
+                    "time_left": str(pt.get("time_left", "0.0m")),
+                }
+                existing_tokens.add(pt_tok)
+    except Exception:
+        pass
+
+    live_count = len([p for p in all_known_positions.values() if str(p.get("mode", "")).upper() == "LIVE"])
+    paper_count = len([p for p in all_known_positions.values() if str(p.get("mode", "")).upper() == "PAPER"])
     positions = {
-        k: p for k, p in state.get("positions", {}).items()
+        k: p for k, p in all_known_positions.items()
         if str(p.get("mode", "PAPER")).upper() == execution_mode_str.upper()
     }
     signals = state.get("signals", [])
@@ -818,9 +845,28 @@ with tab_overview:
     col_positions, col_gates = st.columns([2.4, 1])
 
     with col_positions:
-        st.markdown("##### Open Positions")
+        col_pos_title, col_pos_filter = st.columns([1.4, 1.3])
+        with col_pos_title:
+            st.markdown("##### Open Positions")
+        with col_pos_filter:
+            pos_filter_opts = [f"Active ({execution_mode_str.upper()})", f"All ({len(all_known_positions)})"]
+            selected_pos_view = st.segmented_control("Filter Positions", pos_filter_opts, default=pos_filter_opts[0], key="ov_pos_filter_choice", label_visibility="collapsed") or pos_filter_opts[0]
+
+        if "All" in selected_pos_view:
+            positions = all_known_positions
+        else:
+            positions = {
+                k: p for k, p in all_known_positions.items()
+                if str(p.get("mode", "PAPER")).upper() == execution_mode_str.upper()
+            }
+
         if not positions:
-            st.info("No active positions currently tracked.")
+            other_mode = "PAPER" if execution_mode_str.upper() == "LIVE" else "LIVE"
+            other_count = paper_count if execution_mode_str.upper() == "LIVE" else live_count
+            if other_count > 0:
+                st.info(f"No active **{execution_mode_str.upper()}** positions currently tracked. You have **{other_count} {other_mode}** positions active — select **All ({len(all_known_positions)})** above to view and exit them.")
+            else:
+                st.info("No active positions currently tracked.")
         else:
             df_pos = []
             for tid, p in positions.items():
@@ -899,6 +945,8 @@ with tab_overview:
                                         with st.spinner(f"Submitting sell order on CLOB for {pos_acc}..."):
                                             live_inst.exit_position(pos_acc, token_id_str, size=shares_held, price=exit_p)
                                         broker.exit_position(tid, exit_price=exit_p, note=f"Manual Live Exit via Dashboard @ ${exit_p:.4f}")
+                                        if p.get("trade_id"):
+                                            database.exit_orphaned_trade(p.get("trade_id"), exit_price=exit_p, note=f"Manual Live Exit @ ${exit_p:.4f}")
                                         _cached_all_trades.clear()
                                         st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
                                         st.rerun()
@@ -906,6 +954,8 @@ with tab_overview:
                                         st.error(f"Failed to exit on-chain: {ex}")
                                 else:
                                     broker.exit_position(tid, exit_price=exit_p, note=f"Manual Paper Exit via Dashboard @ ${exit_p:.4f}")
+                                    if p.get("trade_id"):
+                                        database.exit_orphaned_trade(p.get("trade_id"), exit_price=exit_p, note=f"Manual Paper Exit @ ${exit_p:.4f}")
                                     _cached_all_trades.clear()
                                     st.success(f"Closed paper trade! PnL: ${est_pnl:+.2f}")
                                     st.rerun()
@@ -915,11 +965,15 @@ with tab_overview:
                             st.caption(f"Settle {p.get('question')[:30]}...")
                             if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"ov_won_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=True, note="Manual settlement via Dashboard: WON")
+                                if p.get("trade_id"):
+                                    database.force_settle_orphaned_trade(p.get("trade_id"), won=True, note="Manual settlement via Dashboard: WON")
                                 _cached_all_trades.clear()
                                 st.success("Settled as WON!")
                                 st.rerun()
                             if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"ov_lost_{tid}", width="stretch"):
                                 broker.force_settle_position(tid, won=False, note="Manual settlement via Dashboard: LOST")
+                                if p.get("trade_id"):
+                                    database.force_settle_orphaned_trade(p.get("trade_id"), won=False, note="Manual settlement via Dashboard: LOST")
                                 _cached_all_trades.clear()
                                 st.warning("Settled as LOST.")
                                 st.rerun()
@@ -1580,11 +1634,15 @@ with tab_history:
                             st.caption(f"Settle {ot.get('question')[:30]}...")
                             if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"h_won_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=True, note="Manual settlement via Dashboard: WON")
+                                if ot.get("trade_id"):
+                                    database.force_settle_orphaned_trade(ot.get("trade_id"), won=True, note="Manual settlement via Dashboard: WON")
                                 _cached_all_trades.clear()
                                 st.success("Settled as WON!")
                                 st.rerun()
                             if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"h_lost_{ot_key}", width="stretch"):
                                 broker.force_settle_position(ot_tok, won=False, note="Manual settlement via Dashboard: LOST")
+                                if ot.get("trade_id"):
+                                    database.force_settle_orphaned_trade(ot.get("trade_id"), won=False, note="Manual settlement via Dashboard: LOST")
                                 _cached_all_trades.clear()
                                 st.warning("Settled as LOST.")
                                 st.rerun()
