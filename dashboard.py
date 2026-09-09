@@ -1064,12 +1064,14 @@ with tab_control:
                     toggle_label = "Disable" if acc.get("enabled", True) else "Enable"
                     if st.button(toggle_label, key=f"toggle_acc_{acc['id']}"):
                         config.set_account_enabled(acc["id"], not acc.get("enabled", True))
+                        live_broker.invalidate_live_broker_cache()
                         st.rerun()
                 with mc5:
                     confirm_key = f"confirm_remove_{acc['id']}"
                     if st.session_state.get(confirm_key):
                         if st.button("Confirm?", key=f"confirm_btn_{acc['id']}", type="primary"):
                             config.remove_account(acc["id"])
+                            live_broker.invalidate_live_broker_cache()
                             st.session_state.pop(confirm_key, None)
                             st.success(f"Removed {acc['name']}.")
                             st.rerun()
@@ -1100,6 +1102,7 @@ with tab_control:
                         funder_address=new_funder,
                         stake=new_stake if new_stake > 0 else None,
                     )
+                    live_broker.invalidate_live_broker_cache()
                     st.success(f"Account added (slot {idx}). Refreshing...")
                     st.rerun()
                 except ValueError as e:

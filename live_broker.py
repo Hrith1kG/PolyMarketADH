@@ -343,6 +343,15 @@ class LiveBroker:
 _cached_live_broker: Optional[LiveBroker] = None
 
 
+def invalidate_live_broker_cache() -> None:
+    """Drops the cached LiveBroker singleton so the next get_live_broker() call
+    rebuilds it from the current .env contents. Call this after add_account(),
+    remove_account(), or set_account_enabled() so account changes take effect
+    without restarting the process."""
+    global _cached_live_broker
+    _cached_live_broker = None
+
+
 def get_live_broker() -> Optional[LiveBroker]:
     """Returns a singleton instance of LiveBroker if credentials are valid, or None."""
     global _cached_live_broker
