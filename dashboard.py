@@ -913,6 +913,7 @@ with tab_overview:
 
                             live_bid = get_live_token_best_bid(token_id_str)
                             default_exit = live_bid if (live_bid and live_bid > 0.0) else entry_p
+                            safe_default_exit = float(max(0.0001, min(1.0000, float(default_exit or 0.5))))
 
                             st.caption(f"Tokens: `{shares_held:.2f}` | Entry: `${entry_p:.4f}`")
                             if live_bid:
@@ -922,10 +923,11 @@ with tab_overview:
 
                             exit_p = st.number_input(
                                 "Exit Price ($)",
-                                min_value=0.01,
-                                max_value=1.00,
-                                value=float(default_exit),
-                                step=0.01,
+                                min_value=0.0001,
+                                max_value=1.0000,
+                                value=safe_default_exit,
+                                step=0.001,
+                                format="%.4f",
                                 key=f"ov_exit_p_{tid}",
                             )
                             est_return = shares_held * exit_p
@@ -1031,7 +1033,7 @@ with tab_overview:
                     "Trade Stake ($)",
                     min_value=1.0,
                     max_value=500.0,
-                    value=float(settings.get("stake_per_trade", 25.0)),
+                    value=float(max(1.0, min(500.0, float(settings.get("stake_per_trade", 25.0) or 25.0)))),
                     step=5.0,
                     key="overview_manual_stake_input",
                 )
@@ -1419,7 +1421,7 @@ ACCOUNT_1_STAKE=25.0
 
                     cur_single_stk = settings_manager.get_account_stake(vitals["name"], fallback=vitals.get("stake", config.STAKE_PER_TRADE))
                     new_single_stk = st.number_input(
-                        f"Update {vitals['name']} Stake ($)", min_value=1.0, max_value=1000.0, value=float(cur_single_stk), step=5.0,
+                        f"Update {vitals['name']} Stake ($)", min_value=1.0, max_value=1000.0, value=float(max(1.0, min(1000.0, float(cur_single_stk or 1.0)))), step=5.0,
                         key=f"single_acc_stk_{vitals['name']}",
                     )
                     if new_single_stk != cur_single_stk:
@@ -1585,6 +1587,7 @@ with tab_history:
 
                             live_bid = get_live_token_best_bid(ot_tok_str)
                             default_exit = live_bid if (live_bid and live_bid > 0.0) else (ot_entry or 0.95)
+                            safe_default_exit = float(max(0.0001, min(1.0000, float(default_exit or 0.5))))
                             st.caption(f"Tokens: `{ot_tokens:.2f}` | Entry: `${ot_entry:.4f}`")
                             if live_bid:
                                 st.info(f"Live Best Bid on CLOB: **${live_bid:.4f}**")
@@ -1593,10 +1596,11 @@ with tab_history:
 
                             exit_p = st.number_input(
                                 "Exit Price ($)",
-                                min_value=0.01,
-                                max_value=1.00,
-                                value=float(default_exit),
-                                step=0.01,
+                                min_value=0.0001,
+                                max_value=1.0000,
+                                value=safe_default_exit,
+                                step=0.001,
+                                format="%.4f",
                                 key=f"h_exit_p_{ot_key}",
                             )
                             est_return = ot_tokens * exit_p
