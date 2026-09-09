@@ -171,7 +171,7 @@ class PaperBroker:
         opp,
         stake: Optional[float] = None,
         mode: str = "PAPER",
-        account_name: str = "Primary",
+        account_name: str = config.DEFAULT_ACCOUNT_NAME,
         wallet_address: Optional[str] = None,
         limits: Optional[Dict[str, Any]] = None,
         **kwargs
@@ -189,7 +189,7 @@ class PaperBroker:
         shares = stake / opp.confirmed_price
         clean_acc = "".join(c for c in account_name if c.isalnum() or c in ("_", "-"))
         trade_id = f"trd_ord_{clean_acc}_{str(opp.token_id)[:8]}"
-        pos_key = f"{clean_acc}_{opp.token_id}" if account_name != "Primary" else str(opp.token_id)
+        pos_key = f"{clean_acc}_{opp.token_id}" if account_name != config.DEFAULT_ACCOUNT_NAME else str(opp.token_id)
         if pos_key in self.state.get("positions", {}):
             pos_key = f"{clean_acc}_{opp.token_id}_{int(time.time())}"
 
@@ -292,7 +292,7 @@ class PaperBroker:
         }
         self.state["closed_trades"].append(trade)
         self.state["balance"] += payout
-        acc_str = f"[{position.get('account_name', 'Primary')}] " if position.get('account_name') else ""
+        acc_str = f"[{position.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if position.get('account_name') else ""
         self.add_log(f"SETTLED {acc_str}: {position['question'][:45]} [{position['outcome_label']}] pnl={pnl:+.2f} ({note})")
 
         # Settle in local SQLite database
@@ -393,22 +393,66 @@ class PaperBroker:
             self.save()
         return settled
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self, mode_filter: Optional[str] = None) -> Dict[str, Any]:
+        """Returns portfolio KPIs. Pass mode_filter="LIVE" or "PAPER" to scope every
+        figure to positions/trades recorded under that mode only -- both modes share
+        the same state.json, so without this the numbers silently blend LIVE and
+        PAPER activity together regardless of which mode is currently selected."""
+        positions = self.state.get("positions", {})
         closed = self.state.get("closed_trades", [])
+        if mode_filter:
+            positions = {
+                k: p for k, p in positions.items()
+                if str(p.get("mode", "PAPER")).upper() == mode_filter.upper()
+            }
+            closed = [t for t in closed if str(t.get("mode", "PAPER")).upper() == mode_filter.upper()]
+
         wins = [t for t in closed if t.get("pnl", 0) > 0]
         losses = [t for t in closed if t.get("pnl", 0) <= 0]
         win_rate = (len(wins) / len(closed) * 100) if closed else 0.0
+        open_exposure = sum(p["stake"] for p in positions.values())
         return {
             "balance": self.state.get("balance", config.STARTING_BALANCE),
-            "open_positions": len(self.state.get("positions", {})),
-            "open_exposure": self.open_exposure,
+            "open_positions": len(positions),
+            "open_exposure": open_exposure,
             "today_trades": self.today_trades_count,
             "closed_trades": len(closed),
             "wins": len(wins),
             "losses": len(losses),
             "win_rate": win_rate,
             "realized_pnl": sum(t.get("pnl", 0) for t in closed),
-            "reserved_capital": self.open_exposure,
+            "reserved_capital": open_exposure,
             "order_lifecycle": self.state.get("order_lifecycle", {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0}),
         }
+
+    def restore_position_from_trade(self, trade: Dict[str, Any]) -> Dict[str, Any]:
+        """Recreates an open position in state.json from a SQLite trade row that has
+        no matching entry there (e.g. state.json was reset/edited after the trade was
+        placed, orphaning its still-PENDING row). Used by the dashboard's orphaned-trade
+        reconciliation tool when the user decides a stale row actually represents a
+        position that should still be tracked as open."""
+        pos_key = str(trade.get("token_id") or trade.get("trade_id"))
+        position = {
+            "trade_id": trade.get("trade_id"),
+            "mode": str(trade.get("broker", "paper")).upper(),
+            "account_name": trade.get("account_name", config.DEFAULT_ACCOUNT_NAME),
+            "wallet_address": trade.get("wallet_address", ""),
+            "token_id": trade.get("token_id"),
+            "market_id": trade.get("market_id"),
+            "slug": trade.get("slug", ""),
+            "question": trade.get("question", ""),
+            "outcome_label": trade.get("outcome", ""),
+            "entry_price": trade.get("entry_price", 0.0),
+            "shares": trade.get("tokens", 0.0),
+            "stake": trade.get("cost", 0.0),
+            "potential_payout": trade.get("tokens", 0.0),
+            "potential_profit": float(trade.get("tokens", 0.0)) - float(trade.get("cost", 0.0)),
+            "time_left": trade.get("time_left", "0.0m"),
+            "opened_at": trade.get("placed_at", _now_iso()),
+            "end_date": None,
+            "game_start_time": None,
+        }
+        self.state["positions"][pos_key] = position
+        self.save()
+        return position
 

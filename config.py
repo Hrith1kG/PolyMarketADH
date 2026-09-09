@@ -56,6 +56,13 @@ RELAYER_API_KEY_ADDRESS = os.getenv("RELAYER_API_KEY_ADDRESS") or os.getenv("POL
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
+# Single canonical fallback account label. Used whenever a trade/position is recorded
+# without an explicit account_name (the dashboard's manual PAPER trade button, main.py's
+# PAPER fallback loop, and the single-account .env fallback below) so all of these paths
+# agree on one string instead of "Primary" vs "Primary Account" silently diverging in the
+# trades table and account filters.
+DEFAULT_ACCOUNT_NAME = "Primary"
+
 
 def get_configured_accounts() -> list:
     """Discovers and parses configured trading accounts from environment variables.
@@ -109,7 +116,7 @@ def get_configured_accounts() -> list:
         if pk and "your_private_key" not in pk.lower() and len(pk) >= 32:
             accounts.append({
                 "id": "1",
-                "name": "Primary Account",
+                "name": DEFAULT_ACCOUNT_NAME,
                 "private_key": pk,
                 "funder_address": funder or None,
                 "stake": stake,

@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
+import config
+
 DB_FILE = os.getenv("TRADES_DB_FILE", "trades.db")
 
 
@@ -148,7 +150,7 @@ def record_trade(trade: Dict[str, Any], db_path: str = DB_FILE) -> None:
             trade.get("tx_hash"),
             trade.get("closed_at"),
             trade.get("note", ""),
-            trade.get("account_name", "Primary"),
+            (trade.get("account_name") or config.DEFAULT_ACCOUNT_NAME).strip(),
             trade.get("wallet_address", ""),
         ))
         conn.commit()
@@ -225,6 +227,45 @@ def get_all_trades(
         return [dict(row) for row in rows]
 
 
+def delete_trade(trade_id: str, db_path: str = DB_FILE) -> bool:
+    """Permanently removes one trade row, e.g. a stale/orphaned PENDING row with no
+    matching open position anywhere else. Returns True if a row was actually deleted."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("DELETE FROM trades WHERE trade_id = ?", (trade_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def force_settle_orphaned_trade(trade_id: str, won: bool, note: str = "", db_path: str = DB_FILE) -> bool:
+    """Settles a PENDING trade directly in SQLite using its own recorded tokens/cost,
+    for trades that have no corresponding entry in state.json (e.g. state.json was
+    reset or edited after the trade was placed) so PaperBroker.force_settle_position(),
+    which only operates on state.json positions, cannot reach them."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        row = conn.execute("SELECT * FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+    if not row:
+        return False
+    trade = dict(row)
+    resolved_price = 1.0 if won else 0.0
+    tokens = float(trade.get("tokens") or 0.0)
+    cost = float(trade.get("cost") or 0.0)
+    payout = tokens * resolved_price
+    pnl = payout - cost
+    return settle_trade(
+        token_id=str(trade.get("token_id") or ""),
+        trade_id=trade_id,
+        resolved_price=resolved_price,
+        payout=payout,
+        pnl=pnl,
+        result="WON" if won else "LOST",
+        closed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        note=note or ("manual reconciliation: WON" if won else "manual reconciliation: LOST"),
+        db_path=db_path,
+    )
+
+
 def get_available_outcomes(db_path: str = DB_FILE) -> List[str]:
     init_db(db_path)
     with get_connection(db_path) as conn:
@@ -269,7 +310,7 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "tx_hash": p.get("tx_hash"),
             "closed_at": None,
             "note": "",
-            "account_name": p.get("account_name", "Primary"),
+            "account_name": p.get("account_name", config.DEFAULT_ACCOUNT_NAME),
             "wallet_address": p.get("wallet_address", ""),
         }
         record_trade(trade_data, db_path=db_path)
@@ -302,7 +343,7 @@ def sync_from_state(state: Dict[str, Any], db_path: str = DB_FILE) -> int:
             "tx_hash": t.get("tx_hash"),
             "closed_at": t.get("closed_at"),
             "note": t.get("note", ""),
-            "account_name": t.get("account_name", "Primary"),
+            "account_name": t.get("account_name", config.DEFAULT_ACCOUNT_NAME),
             "wallet_address": t.get("wallet_address", ""),
         }
         record_trade(trade_data, db_path=db_path)

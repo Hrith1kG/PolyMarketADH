@@ -446,12 +446,16 @@ def _cached_account_vitals(account_name):
 
 broker = get_broker()
 settings = settings_manager.load_settings()
-summary = broker.summary()
 state = broker.state
 
 # Current Execution Mode
 is_live = bool(settings.get("live_trading", False))
 execution_mode_str = "LIVE" if is_live else "PAPER"
+
+# state.json holds LIVE and PAPER positions/trades together (distinguished only by each
+# entry's "mode" field), so summary() must be scoped to the active mode -- otherwise the
+# Overview KPI ribbon silently blends both regardless of which mode is selected.
+summary = broker.summary(mode_filter=execution_mode_str)
 kill_switch_active = bool(settings.get("entry_kill_switch", False))
 creds_ok, creds_msg = live_broker.check_credentials_available()
 status = settings.get("bot_status", "RUNNING")
@@ -728,7 +732,13 @@ def build_gates_data():
 with tab_overview:
     lifecycle = summary.get("order_lifecycle", {})
     reserved_capital = summary.get("reserved_capital", summary.get("open_exposure", 0.0))
-    positions = state.get("positions", {})
+    # Scoped to the active mode to match summary() above -- otherwise this table would
+    # show PAPER positions while the KPI ribbon above it reports LIVE-only numbers (or
+    # vice versa).
+    positions = {
+        k: p for k, p in state.get("positions", {}).items()
+        if str(p.get("mode", "PAPER")).upper() == execution_mode_str.upper()
+    }
     signals = state.get("signals", [])
 
     # --- Status banner ---
@@ -790,7 +800,7 @@ with tab_overview:
                 poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
                 df_pos.append({
                     "Verify Trade": poly_url,
-                    "Account": p.get("account_name", "Primary"),
+                    "Account": p.get("account_name", config.DEFAULT_ACCOUNT_NAME),
                     "Mode": mode,
                     "Question": p.get("question", "")[:50],
                     "Outcome": p.get("outcome_label", ""),
@@ -811,7 +821,7 @@ with tab_overview:
                     poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
                     qc1, qc2, qc3 = st.columns([2.5, 1.1, 1.0])
                     with qc1:
-                        acc_lbl = f"[{p.get('account_name', 'Primary')}] " if p.get("account_name") else ""
+                        acc_lbl = f"[{p.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if p.get("account_name") else ""
                         st.markdown(f"**{acc_lbl}{p.get('question', '')}** — `{p.get('outcome_label', '')}` · Entry: **{p.get('entry_price', 0):.2f}** · Capital: **${p.get('stake', 0):.2f}**")
                     with qc2:
                         st.link_button("Open Market", poly_url, icon=":material/open_in_new:", width="stretch")
@@ -1280,8 +1290,6 @@ with tab_history:
     default_perf = perf_options[0] if is_live else perf_options[1]
     perf_portfolio_view = st.segmented_control("Select Portfolio View", perf_options, default=default_perf, key="hist_perf_view") or default_perf
 
-    trades_list = _cached_all_trades()
-
     if perf_portfolio_view == "Live Execution Portfolio (On-Chain)":
         live_inst = live_broker.get_live_broker()
         if not live_inst:
@@ -1320,6 +1328,9 @@ with tab_history:
             active_pos_for_expander = live_pos
             active_orders_for_expander = live_orders
     else:
+        # Scoped to broker='paper' -- previously this fetched every trade unfiltered,
+        # so the "Paper Simulation Portfolio" KPIs silently included LIVE trades too.
+        trades_list = _cached_all_trades(broker_filter="paper")
         closed = [t for t in trades_list if "PENDING" not in str(t.get("result", "")).upper()]
         wins = len([t for t in closed if float(t.get("pnl", 0.0)) > 0])
         realized = sum(float(t.get("pnl", 0.0)) for t in closed)
@@ -1364,10 +1375,14 @@ with tab_history:
 
     history_filter = st.segmented_control("Filter", ["ALL", "WON", "LOST"], default="ALL", key="hist_result_filter") or "ALL"
 
-    if not trades_list:
+    # Uses the same account/broker-scoped list that fed the KPI cards above -- previously
+    # this table and the "Active Open Trades" expander below it read the entire, unfiltered
+    # trades table regardless of the selected portfolio view or account filter, so they
+    # could show trades under a different account/mode than the KPIs directly above them.
+    if not active_trades_for_table:
         st.info("No trades recorded in Local DB yet. The bot will record here as soon as orders are entered.")
     else:
-        open_trades = [t for t in trades_list if "PENDING" in str(t.get("result", "")).upper()]
+        open_trades = [t for t in active_trades_for_table if "PENDING" in str(t.get("result", "")).upper()]
         if open_trades:
             with st.expander(f"⚡ Active Open Trades ({len(open_trades)} active)", expanded=False):
                 st.caption("Inspect live odds on Polymarket or immediately settle completed matches:")
@@ -1376,7 +1391,7 @@ with tab_history:
                     ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
                     ot_tok = ot.get("token_id")
                     ot_key = f"{ot_idx}_{ot.get('trade_id') or ot_tok}"
-                    acc_tag = f"[{ot.get('account_name', 'Primary')}] " if ot.get("account_name") else ""
+                    acc_tag = f"[{ot.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if ot.get("account_name") else ""
                     o_c1, o_c2, o_c3 = st.columns([2.5, 1.1, 1.0])
                     with o_c1:
                         st.markdown(f"**{acc_tag}{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
@@ -1398,7 +1413,7 @@ with tab_history:
                                 st.rerun()
 
         table_rows = []
-        for t in trades_list:
+        for t in active_trades_for_table:
             res = str(t.get("result", "PENDING")).upper()
             if "WON" in res:
                 res_tag = "✅ WON"
@@ -1418,7 +1433,7 @@ with tab_history:
 
             table_rows.append({
                 "Polymarket": poly_url,
-                "Account": str(t.get("account_name", "Primary")),
+                "Account": str(t.get("account_name", config.DEFAULT_ACCOUNT_NAME)),
                 "Placed At": str(t.get("placed_at", ""))[:19].replace("T", " "),
                 "Question": str(t.get("question", "")),
                 "Outcome": str(t.get("outcome", "")),
@@ -1470,6 +1485,71 @@ with tab_history:
                     st.info(f"No historical settled positions found for {active_addr[:10]}...")
                 else:
                     st.dataframe(pd.DataFrame(oc_closed), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 View ↗")}, hide_index=True)
+
+    with st.expander("🔍 Orphaned Trade Reconciliation"):
+        st.caption(
+            "PENDING trades recorded in `trades.db` with no matching open position in "
+            "`state.json` -- e.g. after a portfolio reset or a manual state.json edit that "
+            "dropped a position the trade log still remembers. These rows are invisible to "
+            "the Overview tab's Open Positions / Exposure (which read state.json only) but "
+            "still show up under Active Open Trades below (which reads trades.db). Review "
+            "each one and decide: restore it as a tracked open position, settle it as "
+            "WON/LOST, or delete it as stale data."
+        )
+        all_pending = [t for t in database.get_all_trades(limit=1000) if str(t.get("result", "")).upper() == "PENDING"]
+        open_trade_ids = {p.get("trade_id") for p in state.get("positions", {}).values() if p.get("trade_id")}
+        open_token_ids = {str(p.get("token_id")) for p in state.get("positions", {}).values()}
+        orphaned_trades = [
+            t for t in all_pending
+            if t.get("trade_id") not in open_trade_ids and str(t.get("token_id")) not in open_token_ids
+        ]
+
+        if not orphaned_trades:
+            st.success("No orphaned trades found -- every PENDING row has a matching open position.")
+        else:
+            st.warning(f"{len(orphaned_trades)} orphaned PENDING trade(s) found in trades.db with no matching position in state.json.")
+            for orph_idx, ot in enumerate(orphaned_trades):
+                rec_key = ot.get("trade_id") or f"orphan_{orph_idx}"
+                with st.container(border=True):
+                    acc_lbl_o = ot.get("account_name", config.DEFAULT_ACCOUNT_NAME)
+                    st.markdown(
+                        f"**[{acc_lbl_o}] · `{ot.get('broker', 'paper')}`** — {ot.get('question', '')} "
+                        f"· `{ot.get('outcome', '')}` · Entry: **{float(ot.get('entry_price', 0) or 0):.4f}** · "
+                        f"Cost: **${float(ot.get('cost', 0) or 0):.2f}** · "
+                        f"Placed: {str(ot.get('placed_at', ''))[:19].replace('T', ' ')}"
+                    )
+                    r_c1, r_c2, r_c3 = st.columns(3)
+                    with r_c1:
+                        if st.button("Restore as Open Position", icon=":material/history:", key=f"orph_restore_{rec_key}", width="stretch"):
+                            broker.restore_position_from_trade(ot)
+                            st.success("Restored to state.json as an open position.")
+                            st.rerun()
+                    with r_c2:
+                        settle_pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
+                        with settle_pop:
+                            if st.button("Settle WON (1.0)", icon=":material/check_circle:", key=f"orph_won_{rec_key}", width="stretch"):
+                                database.force_settle_orphaned_trade(ot.get("trade_id"), won=True)
+                                _cached_all_trades.clear()
+                                st.success("Settled as WON.")
+                                st.rerun()
+                            if st.button("Settle LOST (0.0)", icon=":material/cancel:", key=f"orph_lost_{rec_key}", width="stretch"):
+                                database.force_settle_orphaned_trade(ot.get("trade_id"), won=False)
+                                _cached_all_trades.clear()
+                                st.warning("Settled as LOST.")
+                                st.rerun()
+                    with r_c3:
+                        confirm_del_key = f"orph_confirm_del_{rec_key}"
+                        if st.session_state.get(confirm_del_key):
+                            if st.button("Confirm Delete?", key=f"orph_confirm_btn_{rec_key}", type="primary", width="stretch"):
+                                database.delete_trade(ot.get("trade_id"))
+                                st.session_state.pop(confirm_del_key, None)
+                                _cached_all_trades.clear()
+                                st.success("Deleted.")
+                                st.rerun()
+                        else:
+                            if st.button("Delete Row", icon=":material/delete:", key=f"orph_del_{rec_key}", width="stretch"):
+                                st.session_state[confirm_del_key] = True
+                                st.rerun()
 
     with st.expander("🧹 Paper Portfolio Maintenance"):
         col_r1, col_r2 = st.columns(2)
