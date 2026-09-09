@@ -2,6 +2,7 @@
 via Polymarket's official polymarket-client SDK across single or multiple accounts."""
 import concurrent.futures
 import math
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 import config
 import polymarket_client
@@ -369,6 +370,89 @@ class LiveBroker:
             except Exception as e:
                 outcomes.append({"account": s.name, "success": False, "error": str(e)})
         return outcomes
+
+    def reconcile_positions(self, account_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Compares pending live trades in local SQLite against actual on-chain positions
+        and Polymarket trade history. If a trade was closed/exited directly on Polymarket,
+        settles it in SQLite with the actual fill price and books P&L."""
+        import database
+        import paper_broker
+        reconciled = []
+        sessions = [self.get_session(account_name)] if account_name else self.account_list
+        sessions = [s for s in sessions if s]
+        broker_inst = paper_broker.PaperBroker()
+
+        for session in sessions:
+            try:
+                # 1. Query live open positions on-chain for this wallet
+                on_chain_pos = session.get_live_positions()
+                held_token_ids = {str(p.get("token_id")) for p in on_chain_pos if float(p.get("size", 0.0)) > 0.0}
+
+                # 2. Query recent trades on-chain for this wallet
+                on_chain_trades_paginator = session.client.list_trades(user=session.wallet, page_size=50)
+                sell_trades_by_token = {}
+                for tr in on_chain_trades_paginator.iter_items():
+                    if str(tr.side).upper() == "SELL":
+                        tok = str(tr.asset_id or "")
+                        if tok and tok not in sell_trades_by_token:
+                            sell_trades_by_token[tok] = tr
+
+                # 3. Find pending live trades in SQLite for this account/wallet
+                db_trades = database.get_all_trades(broker_filter="live", limit=200)
+                pending = [
+                    t for t in db_trades
+                    if str(t.get("result", "")).upper() == "PENDING"
+                    and (not t.get("account_name") or t.get("account_name") == session.name or t.get("wallet_address") == session.wallet)
+                ]
+
+                for pt in pending:
+                    tok = str(pt.get("token_id", ""))
+                    if not tok:
+                        continue
+                    # If token is no longer held in wallet
+                    if tok not in held_token_ids:
+                        matching_sell = sell_trades_by_token.get(tok)
+                        if matching_sell:
+                            sell_price = float(matching_sell.price or 0.0)
+                            sell_tokens = float(matching_sell.size or pt.get("tokens", 0.0))
+                            tokens_held = float(pt.get("tokens") or sell_tokens)
+                            cost = float(pt.get("cost") or 0.0)
+                            payout = tokens_held * sell_price
+                            pnl = payout - cost
+                            res = "WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN")
+                            closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
+                            note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
+
+                            database.settle_trade(
+                                token_id=tok,
+                                trade_id=pt.get("trade_id"),
+                                resolved_price=sell_price,
+                                payout=payout,
+                                pnl=pnl,
+                                result=res,
+                                closed_at=closed_ts,
+                                note=note,
+                            )
+                            # Remove from state.json if present
+                            for pos_k in list(broker_inst.state.get("positions", {}).keys()):
+                                p_obj = broker_inst.state["positions"][pos_k]
+                                if str(p_obj.get("token_id")) == tok or str(p_obj.get("trade_id")) == pt.get("trade_id"):
+                                    broker_inst.state["positions"].pop(pos_k, None)
+                                    broker_inst.save()
+
+                            reconciled.append({
+                                "trade_id": pt.get("trade_id"),
+                                "account": session.name,
+                                "question": pt.get("question"),
+                                "outcome": pt.get("outcome"),
+                                "exit_price": sell_price,
+                                "pnl": pnl,
+                                "note": note,
+                            })
+            except Exception as exc:
+                print(f"[live_broker] Reconciliation error for {session.name}: {exc}")
+
+        return reconciled
 
 
 _cached_live_broker: Optional[LiveBroker] = None

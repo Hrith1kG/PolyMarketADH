@@ -288,7 +288,7 @@ def get_live_token_best_bid(token_id: str) -> Optional[float]:
         client = polymarket_client.get_public_client()
         ob = client.get_order_book(token_id=str(token_id))
         if ob and ob.bids:
-            return float(ob.bids[0].price)
+            return max(float(b.price) for b in ob.bids)
     except Exception:
         pass
     return None
@@ -764,6 +764,10 @@ with tab_overview:
     # Merge positions from state.json and pending trades from trades.db so nothing is missed
     all_known_positions = dict(state.get("positions", {}))
     try:
+        if execution_mode_str.upper() == "LIVE":
+            live_inst = live_broker.get_live_broker()
+            if live_inst:
+                live_inst.reconcile_positions()
         db_pending = [t for t in database.get_all_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
         existing_tokens = {str(p.get("token_id")) for p in all_known_positions.values()}
         for pt in db_pending:
@@ -845,12 +849,25 @@ with tab_overview:
     col_positions, col_gates = st.columns([2.4, 1])
 
     with col_positions:
-        col_pos_title, col_pos_filter = st.columns([1.4, 1.3])
+        col_pos_title, col_pos_filter, col_pos_sync = st.columns([1.1, 1.2, 0.7])
         with col_pos_title:
             st.markdown("##### Open Positions")
         with col_pos_filter:
             pos_filter_opts = [f"Active ({execution_mode_str.upper()})", f"All ({len(all_known_positions)})"]
             selected_pos_view = st.segmented_control("Filter Positions", pos_filter_opts, default=pos_filter_opts[0], key="ov_pos_filter_choice", label_visibility="collapsed") or pos_filter_opts[0]
+        with col_pos_sync:
+            if st.button("Sync", icon=":material/sync:", help="Sync active positions with on-chain Polymarket trades & fills", key="ov_sync_onchain", use_container_width=True):
+                reconciled_list = []
+                live_inst = live_broker.get_live_broker()
+                if live_inst:
+                    with st.spinner("Checking Polymarket on-chain records..."):
+                        reconciled_list = live_inst.reconcile_positions()
+                _cached_all_trades.clear()
+                if reconciled_list:
+                    st.success(f"Synced {len(reconciled_list)} trade(s) from Polymarket!")
+                else:
+                    st.info("Positions are fully in sync with Polymarket.")
+                st.rerun()
 
         if "All" in selected_pos_view:
             positions = all_known_positions
@@ -953,7 +970,22 @@ with tab_overview:
                                         st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
                                         st.rerun()
                                     except Exception as ex:
-                                        st.error(f"Failed to exit on-chain: {ex}")
+                                        err_s = str(ex).lower()
+                                        if "balance is not enough" in err_s or "not enough balance" in err_s:
+                                            with st.spinner("Detected 0 on-chain balance. Checking Polymarket records to reconcile..."):
+                                                reconciled = live_inst.reconcile_positions(pos_acc)
+                                            if reconciled:
+                                                _cached_all_trades.clear()
+                                                st.success(f"Position was already exited on Polymarket! Reconciled: {reconciled[0].get('note')}")
+                                                st.rerun()
+                                            else:
+                                                if p.get("trade_id"):
+                                                    database.force_settle_orphaned_trade(p.get("trade_id"), won=False, note="Closed: 0 balance on Polymarket")
+                                                _cached_all_trades.clear()
+                                                st.warning("Position already closed on Polymarket. Settled in local database.")
+                                                st.rerun()
+                                        else:
+                                            st.error(f"Failed to exit on-chain: {ex}")
                                 else:
                                     broker.exit_position(tid, exit_price=exit_p, note=f"Manual Paper Exit via Dashboard @ ${exit_p:.4f}")
                                     if p.get("trade_id"):
@@ -1537,6 +1569,10 @@ with tab_history:
         btn_c1, btn_c2 = st.columns(2)
         with btn_c1:
             if st.button("Refresh", icon=":material/refresh:", width="stretch", key="hist_refresh"):
+                live_inst = live_broker.get_live_broker()
+                if live_inst:
+                    with st.spinner("Checking on-chain Polymarket status..."):
+                        live_inst.reconcile_positions()
                 _cached_all_trades.clear()
                 st.rerun()
         with btn_c2:
@@ -1625,7 +1661,22 @@ with tab_history:
                                         st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
                                         st.rerun()
                                     except Exception as ex:
-                                        st.error(f"Failed to exit on-chain: {ex}")
+                                        err_s = str(ex).lower()
+                                        if "balance is not enough" in err_s or "not enough balance" in err_s:
+                                            with st.spinner("Detected 0 on-chain balance. Checking Polymarket records to reconcile..."):
+                                                reconciled = live_inst.reconcile_positions(ot_acc)
+                                            if reconciled:
+                                                _cached_all_trades.clear()
+                                                st.success(f"Position was already exited on Polymarket! Reconciled: {reconciled[0].get('note')}")
+                                                st.rerun()
+                                            else:
+                                                if ot.get("trade_id"):
+                                                    database.force_settle_orphaned_trade(ot.get("trade_id"), won=False, note="Closed: 0 balance on Polymarket")
+                                                _cached_all_trades.clear()
+                                                st.warning("Position already closed on Polymarket. Settled in local database.")
+                                                st.rerun()
+                                        else:
+                                            st.error(f"Failed to exit on-chain: {ex}")
                                 else:
                                     broker.exit_position(ot_tok, exit_price=exit_p, note=f"Manual Paper Exit via History @ ${exit_p:.4f}")
                                     database.exit_orphaned_trade(ot.get("trade_id"), exit_price=exit_p, note=f"Manual Paper Exit @ ${exit_p:.4f}")
