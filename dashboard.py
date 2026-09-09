@@ -1075,7 +1075,7 @@ with tab_control:
         if configured_accounts:
             st.markdown("**Configured Accounts**")
             for acc in configured_accounts:
-                mc1, mc2, mc3, mc4, mc5 = st.columns([2, 3, 1.2, 1, 1])
+                mc1, mc2, mc3, mc4, mc5, mc6 = st.columns([1.8, 2.2, 1.1, 1, 1, 1.2])
                 with mc1:
                     st.text(acc["name"])
                 with mc2:
@@ -1101,6 +1101,38 @@ with tab_control:
                         if st.button("Remove", key=f"remove_acc_{acc['id']}"):
                             st.session_state[confirm_key] = True
                             st.rerun()
+                with mc6:
+                    has_relayer = bool(acc.get("relayer_api_key"))
+                    relayer_pop = st.popover(
+                        "⛽ Gasless" if has_relayer else "⛽ Set Relayer",
+                        width="stretch",
+                        help="Configure a Polymarket Relayer API key so this account's orders submit gaslessly instead of paying MATIC gas.",
+                    )
+                    with relayer_pop:
+                        st.caption(
+                            f"**{acc['name']}** currently "
+                            + ("uses a Relayer API key (gasless submission)." if has_relayer
+                               else "has no Relayer API key set -- it pays its own MATIC gas per order.")
+                        )
+                        st.caption("Create one at polymarket.com → Settings → Relayer API keys, then paste both values below.")
+                        r_key = st.text_input("Relayer API Key", type="password", placeholder="Paste RELAYER_API_KEY", key=f"relayer_key_{acc['id']}")
+                        r_addr = st.text_input("Relayer API Key Address", placeholder="0x... (Signer Address from the same page)", key=f"relayer_addr_{acc['id']}")
+                        rc1, rc2 = st.columns(2)
+                        with rc1:
+                            if st.button("Save", key=f"relayer_save_{acc['id']}", type="primary", width="stretch"):
+                                if r_key.strip() and r_addr.strip():
+                                    config.set_account_relayer(acc["id"], r_key, r_addr)
+                                    live_broker.invalidate_live_broker_cache()
+                                    st.success(f"Relayer credentials saved for {acc['name']}.")
+                                    st.rerun()
+                                else:
+                                    st.warning("Both the Relayer API Key and its Address are required.")
+                        with rc2:
+                            if has_relayer and st.button("Clear", key=f"relayer_clear_{acc['id']}", width="stretch"):
+                                config.set_account_relayer(acc["id"], "", "")
+                                live_broker.invalidate_live_broker_cache()
+                                st.info(f"Relayer credentials cleared for {acc['name']} (will pay its own gas, or fall back to the global RELAYER_API_KEY if set).")
+                                st.rerun()
             st.divider()
         else:
             st.info("No trading accounts configured yet. Add one below to enable live trading.")
@@ -1115,6 +1147,9 @@ with tab_control:
                 min_value=0.0, value=0.0, step=5.0,
                 help="Leave at 0 to use the global stake-per-trade setting for this account.",
             )
+            st.caption("Optional -- for gasless order submission via Polymarket's Relayer (Settings → Relayer API keys on polymarket.com). Leave blank to pay MATIC gas directly, or to inherit the global RELAYER_API_KEY from `.env`.")
+            new_relayer_key = st.text_input("Relayer API Key (optional)", type="password", placeholder="Paste RELAYER_API_KEY")
+            new_relayer_addr = st.text_input("Relayer API Key Address (optional)", placeholder="0x... (Signer Address from the same page)")
             submitted = st.form_submit_button("Add Account", type="primary")
             if submitted:
                 try:
@@ -1123,6 +1158,8 @@ with tab_control:
                         private_key=new_pk,
                         funder_address=new_funder,
                         stake=new_stake if new_stake > 0 else None,
+                        relayer_api_key=new_relayer_key,
+                        relayer_api_key_address=new_relayer_addr,
                     )
                     live_broker.invalidate_live_broker_cache()
                     st.success(f"Account added (slot {idx}). Refreshing...")

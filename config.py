@@ -218,3 +218,15 @@ def remove_account(account_id: str, path: str = None) -> None:
     lines = [l for l in _read_env_lines(path) if not l.strip().startswith(prefix)]
     _write_env_lines(lines, path)
 
+
+def set_account_relayer(account_id: str, relayer_api_key: str, relayer_api_key_address: str, path: str = None) -> None:
+    """Adds or updates an existing account's Polymarket Relayer API credentials (for
+    gasless order submission) without touching its private key or any other field.
+    Passing empty strings clears the account's relayer config, falling back to the
+    global RELAYER_API_KEY/RELAYER_API_KEY_ADDRESS (if set) or direct/gas-paying
+    submission."""
+    lines = _read_env_lines(path)
+    lines = _set_env_var(lines, f"ACCOUNT_{account_id}_RELAYER_API_KEY", (relayer_api_key or "").strip())
+    lines = _set_env_var(lines, f"ACCOUNT_{account_id}_RELAYER_API_KEY_ADDRESS", (relayer_api_key_address or "").strip())
+    _write_env_lines(lines, path)
+
