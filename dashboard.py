@@ -295,7 +295,7 @@ def fetch_on_chain_wallet_data(address: str):
 
     try:
         trades_paginator = client.list_trades(user=clean_addr, page_size=50)
-        for t in trades_paginator:
+        for t in trades_paginator.iter_items():
             p_val = float(t.price) if t.price is not None else 0.0
             s_val = float(t.size) if t.size is not None else 0.0
             t_slug = getattr(t, "slug", "") or ""
@@ -319,7 +319,7 @@ def fetch_on_chain_wallet_data(address: str):
 
     try:
         positions_paginator = client.list_positions(user=clean_addr)
-        for p in positions_paginator:
+        for p in positions_paginator.iter_items():
             avg_p = float(p.avg_price) if p.avg_price is not None else 0.0
             sz = float(p.size) if p.size is not None else 0.0
             c_pnl = float(p.cash_pnl) if p.cash_pnl is not None else 0.0
@@ -345,7 +345,7 @@ def fetch_on_chain_wallet_data(address: str):
 
     try:
         closed_paginator = client.list_closed_positions(user=clean_addr)
-        for cp in closed_paginator:
+        for cp in closed_paginator.iter_items():
             avg_p = float(cp.avg_price) if cp.avg_price is not None else 0.0
             cur_p = float(cp.cur_price) if cp.cur_price is not None else 0.0
             pnl_v = float(cp.realized_pnl) if cp.realized_pnl is not None else 0.0

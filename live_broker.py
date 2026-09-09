@@ -87,7 +87,7 @@ class AccountSession:
         try:
             paginator = self.client.list_open_orders()
             orders = []
-            for order in paginator:
+            for order in paginator.iter_items():
                 orders.append({
                     "account": self.name,
                     "wallet": self.wallet,
@@ -110,7 +110,7 @@ class AccountSession:
         try:
             paginator = self.client.list_positions(user=self.wallet)
             positions = []
-            for p in paginator:
+            for p in paginator.iter_items():
                 positions.append({
                     "account": self.name,
                     "wallet": self.wallet,
