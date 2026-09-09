@@ -19,3 +19,9 @@ showErrorDetails = true
 
 [browser]
 gatherUsageStats = false
+
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+
