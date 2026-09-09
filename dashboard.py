@@ -1512,6 +1512,7 @@ with tab_history:
                     ot_url = database.get_polymarket_url(ot_slug, ot.get("market_id"))
                     ot_tok = ot.get("token_id")
                     ot_key = f"{ot_idx}_{ot.get('trade_id') or ot_tok}"
+                    acc_tag = f"[{ot.get('account_name', config.DEFAULT_ACCOUNT_NAME)}] " if ot.get("account_name") else ""
                     o_c1, o_c2, o_c3, o_c4 = st.columns([2.2, 0.8, 0.8, 0.8])
                     with o_c1:
                         st.markdown(f"**{acc_tag}{ot.get('question')}** · `{ot.get('outcome')}` · Entry: **{float(ot.get('entry_price', 0)):.2f}** · Cost: **${float(ot.get('cost', 0)):.2f}**")
