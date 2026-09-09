@@ -279,13 +279,19 @@ def get_broker() -> PaperBroker:
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_on_chain_wallet_data(address: str):
-    """Queries Polymarket's official Data API for an arbitrary wallet address."""
+    """Queries Polymarket's official Data API for an arbitrary wallet address.
+    Returns (trades, positions, closed_pos, errors). Failures used to be swallowed by a
+    bare print() -- invisible once this dashboard runs as a background NSSM/Windows
+    service with no console -- so each failure is now also collected into `errors` for
+    the caller to display with st.error(), instead of silently rendering as if the
+    wallet just had no activity."""
     import polymarket_client
     client = polymarket_client.get_public_client()
     clean_addr = address.strip()
     trades = []
     positions = []
     closed_pos = []
+    errors = []
 
     try:
         trades_paginator = client.list_trades(user=clean_addr, page_size=50)
@@ -307,7 +313,9 @@ def fetch_on_chain_wallet_data(address: str):
                 "Tx Hash": str(t.transaction_hash or "")[:12] + "..." if t.transaction_hash else "",
             })
     except Exception as e:
-        print(f"[dashboard] Error fetching trades for {clean_addr}: {e}")
+        err = f"Fetching trades failed: {type(e).__name__}: {e}"
+        print(f"[dashboard] {err} (address={clean_addr})")
+        errors.append(err)
 
     try:
         positions_paginator = client.list_positions(user=clean_addr)
@@ -331,7 +339,9 @@ def fetch_on_chain_wallet_data(address: str):
                 "Redeemable": "✅ Yes" if p.redeemable else "No",
             })
     except Exception as e:
-        print(f"[dashboard] Error fetching positions for {clean_addr}: {e}")
+        err = f"Fetching open positions failed: {type(e).__name__}: {e}"
+        print(f"[dashboard] {err} (address={clean_addr})")
+        errors.append(err)
 
     try:
         closed_paginator = client.list_closed_positions(user=clean_addr)
@@ -353,9 +363,11 @@ def fetch_on_chain_wallet_data(address: str):
                 "Closed At": str(cp.timestamp)[:19].replace("T", " ") if cp.timestamp else "",
             })
     except Exception as e:
-        print(f"[dashboard] Error fetching closed positions for {clean_addr}: {e}")
+        err = f"Fetching closed positions failed: {type(e).__name__}: {e}"
+        print(f"[dashboard] {err} (address={clean_addr})")
+        errors.append(err)
 
-    return trades, positions, closed_pos
+    return trades, positions, closed_pos, errors
 
 
 def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
@@ -1467,7 +1479,10 @@ with tab_history:
             st.info("Enter a valid Polymarket wallet address (`0x...`) above to populate live on-chain trades, positions, and P&L.")
         else:
             with st.spinner(f"Fetching on-chain Data API feed for {active_addr[:8]}..."):
-                oc_trades, oc_positions, oc_closed = fetch_on_chain_wallet_data(active_addr)
+                oc_trades, oc_positions, oc_closed, oc_errors = fetch_on_chain_wallet_data(active_addr)
+
+            for oc_err in oc_errors:
+                st.error(oc_err)
 
             oc_t1, oc_t2, oc_t3 = st.tabs([":material/work: Open Positions", ":material/trending_up: Filled Trades", ":material/receipt_long: Settled & Realized P&L"])
             with oc_t1:
