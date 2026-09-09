@@ -59,9 +59,25 @@ class PaperBroker:
             tmp = f"{self.state_path}.tmp"
             with open(tmp, "w") as f:
                 json.dump(self.state, f, indent=2)
-            os.replace(tmp, self.state_path)
         except Exception as e:
-            print(f"[broker] Error saving state: {e}")
+            print(f"[broker] Error writing state tmp file: {e}")
+            return
+
+        # On Windows, os.replace() can raise PermissionError ("Access is denied") if
+        # another process (the bot and the dashboard both run as separate services
+        # against the same state.json) briefly has the destination file open -- unlike
+        # POSIX, Windows won't rename over a file with an open handle. These collisions
+        # are normally released within milliseconds, so retry briefly before giving up
+        # and losing the write.
+        last_exc = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp, self.state_path)
+                return
+            except PermissionError as e:
+                last_exc = e
+                time.sleep(0.1 * (attempt + 1))
+        print(f"[broker] Error saving state after retries (state change may be lost): {last_exc}")
 
     def add_log(self, message: str, level: str = "INFO"):
         entry = {
