@@ -330,9 +330,41 @@ def fetch_on_chain_wallet_data(address: str):
                 "Tx Hash": str(t.transaction_hash or "")[:12] + "..." if t.transaction_hash else "",
             })
     except Exception as e:
-        err = f"Fetching trades failed: {type(e).__name__}: {e}"
-        print(f"[dashboard] {err} (address={clean_addr})")
-        errors.append(err)
+        # Fallback to direct Polymarket Data API
+        try:
+            import urllib.request, json
+            url = f"https://data-api.polymarket.com/trades?user={clean_addr}&limit=50"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw_trades = json.loads(resp.read().decode())
+                for t in raw_trades:
+                    p_val = float(t.get("price") or 0.0)
+                    s_val = float(t.get("size") or 0.0)
+                    t_slug = t.get("slug") or ""
+                    t_eslug = t.get("eventSlug") or ""
+                    t_url = f"https://polymarket.com/market/{t_slug}" if t_slug else (f"https://polymarket.com/event/{t_eslug}" if t_eslug else "https://polymarket.com")
+                    raw_ts = t.get("timestamp")
+                    ts_str = ""
+                    if raw_ts:
+                        try:
+                            ts_str = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            ts_str = str(raw_ts)[:19].replace("T", " ")
+                    trades.append({
+                        "Polymarket": t_url,
+                        "Timestamp": ts_str,
+                        "Market / Question": str(t.get("title") or "")[:50],
+                        "Outcome": str(t.get("outcome") or ""),
+                        "Side": str(t.get("side") or "BUY").upper(),
+                        "Tokens": round(s_val, 4),
+                        "Entry $": f"{p_val * 100:.2f}%" if p_val < 1.0 else f"${p_val:.2f}",
+                        "Cost $": f"${(s_val * p_val):.2f}",
+                        "Tx Hash": str(t.get("transactionHash") or "")[:12] + "..." if t.get("transactionHash") else "",
+                    })
+        except Exception as fallback_err:
+            err = f"Fetching trades failed: {type(fallback_err).__name__}: {fallback_err}"
+            print(f"[dashboard] {err} (address={clean_addr})")
+            errors.append(err)
 
     try:
         positions_paginator = client.list_positions(user=clean_addr)
@@ -356,33 +388,106 @@ def fetch_on_chain_wallet_data(address: str):
                 "Redeemable": "✅ Yes" if p.redeemable else "No",
             })
     except Exception as e:
-        err = f"Fetching open positions failed: {type(e).__name__}: {e}"
-        print(f"[dashboard] {err} (address={clean_addr})")
-        errors.append(err)
+        # Fallback to direct Polymarket Data API
+        try:
+            import urllib.request, json
+            url = f"https://data-api.polymarket.com/positions?user={clean_addr}&sizeThreshold=0.01&limit=50"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw_pos = json.loads(resp.read().decode())
+                for p in raw_pos:
+                    avg_p = float(p.get("avgPrice") or 0.0)
+                    sz = float(p.get("size") or 0.0)
+                    c_pnl = float(p.get("cashPnl") or 0.0)
+                    p_slug = p.get("slug") or ""
+                    p_eslug = p.get("eventSlug") or ""
+                    p_url = f"https://polymarket.com/market/{p_slug}" if p_slug else (f"https://polymarket.com/event/{p_eslug}" if p_eslug else "https://polymarket.com")
+                    positions.append({
+                        "Polymarket": p_url,
+                        "Market / Question": str(p.get("title") or "")[:50],
+                        "Outcome": str(p.get("outcome") or ""),
+                        "Tokens": round(sz, 4),
+                        "Avg Entry": f"{avg_p * 100:.2f}%" if avg_p < 1.0 else f"${avg_p:.2f}",
+                        "Cost $": f"${float(p.get('initialValue') or 0):.2f}",
+                        "Current Value": f"${float(p.get('currentValue') or 0):.2f}",
+                        "Cash P&L": f"${c_pnl:+.2f}",
+                        "% P&L": f"{float(p.get('percentPnl') or 0):+.1f}%",
+                        "Redeemable": "✅ Yes" if p.get("redeemable") else "No",
+                    })
+        except Exception as fallback_err:
+            err = f"Fetching open positions failed: {type(fallback_err).__name__}: {fallback_err}"
+            print(f"[dashboard] {err} (address={clean_addr})")
+            errors.append(err)
 
     try:
-        closed_paginator = client.list_closed_positions(user=clean_addr)
-        for cp in closed_paginator.iter_items():
-            avg_p = float(cp.avg_price) if cp.avg_price is not None else 0.0
-            cur_p = float(cp.cur_price) if cp.cur_price is not None else 0.0
-            pnl_v = float(cp.realized_pnl) if cp.realized_pnl is not None else 0.0
-            cp_slug = getattr(cp, "slug", "") or ""
-            cp_eslug = getattr(cp, "event_slug", "") or ""
-            cp_url = f"https://polymarket.com/market/{cp_slug}" if cp_slug else (f"https://polymarket.com/event/{cp_eslug}" if cp_eslug else "https://polymarket.com")
-            closed_pos.append({
-                "Polymarket": cp_url,
-                "Market / Question": str(cp.title or "")[:50],
-                "Outcome": str(cp.outcome or ""),
-                "Avg Entry": f"{avg_p * 100:.2f}%" if avg_p < 1.0 else f"${avg_p:.2f}",
-                "Exit Price": f"{cur_p * 100:.2f}%" if cur_p < 1.0 else f"${cur_p:.2f}",
-                "Cost $": f"${float(cp.total_bought or 0):.2f}",
-                "Realized P&L": f"${pnl_v:+.2f}",
-                "Closed At": str(cp.timestamp)[:19].replace("T", " ") if cp.timestamp else "",
-            })
+        if hasattr(client, "list_closed_positions"):
+            closed_paginator = client.list_closed_positions(user=clean_addr)
+            for cp in closed_paginator.iter_items():
+                avg_p = float(cp.avg_price) if cp.avg_price is not None else 0.0
+                cur_p = float(cp.cur_price) if cp.cur_price is not None else 0.0
+                pnl_v = float(cp.realized_pnl) if cp.realized_pnl is not None else 0.0
+                cp_slug = getattr(cp, "slug", "") or ""
+                cp_eslug = getattr(cp, "event_slug", "") or ""
+                cp_url = f"https://polymarket.com/market/{cp_slug}" if cp_slug else (f"https://polymarket.com/event/{cp_eslug}" if cp_eslug else "https://polymarket.com")
+                raw_ts = getattr(cp, "timestamp", None)
+                ts_str = ""
+                if raw_ts:
+                    try:
+                        if isinstance(raw_ts, (int, float)):
+                            ts_str = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            ts_str = str(raw_ts)[:19].replace("T", " ")
+                    except Exception:
+                        ts_str = str(raw_ts)[:19].replace("T", " ")
+                closed_pos.append({
+                    "Polymarket": cp_url,
+                    "Market / Question": str(cp.title or "")[:50],
+                    "Outcome": str(cp.outcome or ""),
+                    "Avg Entry": f"{avg_p * 100:.2f}%" if avg_p < 1.0 else f"${avg_p:.2f}",
+                    "Exit Price": f"{cur_p * 100:.2f}%" if cur_p < 1.0 else f"${cur_p:.2f}",
+                    "Cost $": f"${float(cp.total_bought or 0):.2f}",
+                    "Realized P&L": f"${pnl_v:+.2f}",
+                    "Closed At": ts_str,
+                })
+        else:
+            raise AttributeError("'PublicClient' object has no attribute 'list_closed_positions'")
     except Exception as e:
-        err = f"Fetching closed positions failed: {type(e).__name__}: {e}"
-        print(f"[dashboard] {err} (address={clean_addr})")
-        errors.append(err)
+        # Fallback to direct Polymarket Data API
+        try:
+            import urllib.request, json
+            url = f"https://data-api.polymarket.com/closed-positions?user={clean_addr}&limit=50"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw_items = json.loads(resp.read().decode())
+                for item in raw_items:
+                    avg_p = float(item.get("avgPrice") or 0.0)
+                    cur_p = float(item.get("curPrice") or 0.0)
+                    pnl_v = float(item.get("realizedPnl") or 0.0)
+                    total_bought = float(item.get("totalBought") or 0.0)
+                    cp_slug = item.get("slug") or ""
+                    cp_eslug = item.get("eventSlug") or ""
+                    cp_url = f"https://polymarket.com/market/{cp_slug}" if cp_slug else (f"https://polymarket.com/event/{cp_eslug}" if cp_eslug else "https://polymarket.com")
+                    raw_ts = item.get("timestamp")
+                    ts_str = ""
+                    if raw_ts:
+                        try:
+                            ts_str = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            ts_str = str(raw_ts)[:19].replace("T", " ")
+                    closed_pos.append({
+                        "Polymarket": cp_url,
+                        "Market / Question": str(item.get("title") or "")[:50],
+                        "Outcome": str(item.get("outcome") or ""),
+                        "Avg Entry": f"{avg_p * 100:.2f}%" if avg_p < 1.0 else f"${avg_p:.2f}",
+                        "Exit Price": f"{cur_p * 100:.2f}%" if cur_p < 1.0 else f"${cur_p:.2f}",
+                        "Cost $": f"${total_bought:.2f}",
+                        "Realized P&L": f"${pnl_v:+.2f}",
+                        "Closed At": ts_str,
+                    })
+        except Exception as fallback_err:
+            err = f"Fetching closed positions failed: {type(fallback_err).__name__}: {fallback_err}"
+            print(f"[dashboard] {err} (address={clean_addr})")
+            errors.append(err)
 
     return trades, positions, closed_pos, errors
 
