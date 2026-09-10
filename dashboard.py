@@ -111,7 +111,7 @@ def get_broker() -> PaperBroker:
     return PaperBroker()
 
 @st.cache_data(ttl=10, show_spinner=False)
-def get_db_trades(limit: int = None, broker_filter: str = None, account_filter: str = None):
+def get_db_trades(limit: int = 200, broker_filter: str = None, account_filter: str = None):
     return database.get_all_trades(limit=limit, broker_filter=broker_filter, account_filter=account_filter)
 
 
