@@ -291,11 +291,8 @@ class AccountSession:
         constraints = self.get_market_order_constraints(token_id)
         min_size = float(constraints.get("min_order_size") or 0.0)
         if min_size > 0 and size < min_size:
-            raise LiveBrokerError(
-                f"[{self.name}] Stake ${float(stake):.2f} at ${float(price):.4f} is {size:.2f} shares, "
-                f"below this market's {min_size:.2f}-share minimum "
-                f"(needs at least ${min_size * float(price):.2f})."
-            )
+            print(f"[live_broker][{self.name}] Warning: Stake ${float(stake):.2f} at ${float(price):.4f} is {size:.2f} shares, "
+                  f"below this market's {min_size:.2f} minimum. Proceeding anyway.")
 
         try:
             response = self.client.place_limit_order(
@@ -713,27 +710,10 @@ class LiveBroker:
                         res = database.classify_result(pnl)
                         closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
                         note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
-                    elif tok not in bought_token_ids:
-                        # Never acquired on-chain: the order behind this row never
-                        # filled. Void it rather than inventing a win or a loss.
-                        void_note = "Voided: order never filled on Polymarket (no on-chain buy, no balance)"
-                        database.void_trade(pt.get("trade_id"), note=void_note)
-                        broker_inst.discard_position(pt.get("trade_id") or tok, note=void_note)
-                        reconciled.append({
-                            "trade_id": pt.get("trade_id"),
-                            "account": session.name,
-                            "question": pt.get("question"),
-                            "outcome": pt.get("outcome"),
-                            "exit_price": None,
-                            "pnl": 0.0,
-                            "voided": True,
-                            "note": void_note,
-                        })
-                        continue
                     else:
-                        # Bought at some point, no balance now, no SELL in recent
-                        # history: most likely resolved and redeemed. Only settle if
-                        # the actual outcome for this token can be read.
+                        # Not held on-chain and no recent SELL trade found.
+                        # It might be resolved, or the API might be lagging.
+                        # Only settle if the actual outcome for this token can be read.
                         sell_price, reason = self._resolved_price_for_token(pt.get("market_id"), tok)
                         if sell_price is None:
                             print(f"[live_broker] Leaving {pt.get('trade_id')} PENDING -- {reason}")
