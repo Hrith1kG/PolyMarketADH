@@ -1071,11 +1071,13 @@ with tab_overview:
         # rerun meant it fired on page load and on every widget interaction. It is
         # now only triggered explicitly, by the Sync and Refresh buttons.
         db_pending = [t for t in database.get_all_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
-        existing_tokens = {str(p.get("token_id")) for p in all_known_positions.values()}
+        existing_trade_ids = {str(p.get("trade_id")) for p in all_known_positions.values() if p.get("trade_id")}
         for pt in db_pending:
             pt_tok = str(pt.get("token_id", ""))
-            if pt_tok and pt_tok not in existing_tokens:
-                pos_k = f"{pt.get('account_name', 'acc')}_{pt_tok}"
+            tr_id = str(pt.get("trade_id", ""))
+            if pt_tok and tr_id and tr_id not in existing_trade_ids:
+                pt_acc = str(pt.get("account_name", "acc"))
+                pos_k = f"{pt_acc}_{pt_tok}_{int(time.time()*1000)}"
                 all_known_positions[pos_k] = {
                     "trade_id": pt.get("trade_id"),
                     "mode": str(pt.get("broker", pt.get("mode", "paper"))).upper(),
@@ -1091,7 +1093,7 @@ with tab_overview:
                     "stake": float(pt.get("cost", pt.get("stake", 0.0)) or 0.0),
                     "time_left": str(pt.get("time_left", "0.0m")),
                 }
-                existing_tokens.add(pt_tok)
+                existing_trade_ids.add(tr_id)
     except Exception:
         pass
 
