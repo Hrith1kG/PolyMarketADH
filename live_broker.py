@@ -422,33 +422,75 @@ class LiveBroker:
                             res = "WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN")
                             closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
                             note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
+                        else:
+                            # Token is not held in wallet, but no direct CLOB limit sell trade found.
+                            # This occurs when:
+                            # 1) The market resolved and winnings were redeemed on Polymarket
+                            # 2) The market closed/expired
+                            # 3) The position was sold via an AMM/relayer or outside the recent 50 trades
+                            m_id = pt.get("market_id")
+                            sell_price = None
+                            if m_id:
+                                try:
+                                    pub_client = polymarket_client.get_public_client()
+                                    m = pub_client.get_market(id=str(m_id))
+                                    if m and m.state:
+                                        uma_status = str(m.resolution.uma_resolution_status).lower() if (m.resolution and m.resolution.uma_resolution_status) else ""
+                                        is_uma = "resolved" in uma_status
+                                        raw_p = None
+                                        if m.outcomes:
+                                            for oc in [m.outcomes.yes, m.outcomes.no]:
+                                                if oc and oc.token_id and str(oc.token_id) == tok:
+                                                    if oc.price is not None:
+                                                        raw_p = float(oc.price)
+                                                    break
+                                        if is_uma or (m.state.closed and raw_p is not None and (raw_p >= 0.95 or raw_p <= 0.05)):
+                                            sell_price = 1.0 if (raw_p is not None and raw_p >= 0.5) or is_uma else 0.0
+                                        elif m.state.closed and raw_p is not None:
+                                            sell_price = raw_p
+                                except Exception as m_chk_err:
+                                    print(f"[live_broker] Resolution check notice for market {m_id}: {m_chk_err}")
 
-                            database.settle_trade(
-                                token_id=tok,
-                                trade_id=pt.get("trade_id"),
-                                resolved_price=sell_price,
-                                payout=payout,
-                                pnl=pnl,
-                                result=res,
-                                closed_at=closed_ts,
-                                note=note,
-                            )
-                            # Remove from state.json if present
-                            for pos_k in list(broker_inst.state.get("positions", {}).keys()):
-                                p_obj = broker_inst.state["positions"][pos_k]
-                                if str(p_obj.get("token_id")) == tok or str(p_obj.get("trade_id")) == pt.get("trade_id"):
-                                    broker_inst.state["positions"].pop(pos_k, None)
-                                    broker_inst.save()
+                            if sell_price is None:
+                                entry_p = float(pt.get("entry_price") or 0.95)
+                                sell_price = 1.0 if entry_p >= 0.90 else 0.0
+                                note = f"Closed on Polymarket (0 on-chain balance / redeemed) @ ${sell_price:.2f}"
+                            else:
+                                note = f"Resolved on Polymarket (0 on-chain balance) @ ${sell_price:.4f}"
 
-                            reconciled.append({
-                                "trade_id": pt.get("trade_id"),
-                                "account": session.name,
-                                "question": pt.get("question"),
-                                "outcome": pt.get("outcome"),
-                                "exit_price": sell_price,
-                                "pnl": pnl,
-                                "note": note,
-                            })
+                            tokens_held = float(pt.get("tokens") or 0.0)
+                            cost = float(pt.get("cost") or 0.0)
+                            payout = tokens_held * sell_price
+                            pnl = payout - cost
+                            res = "WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN")
+                            closed_ts = datetime.now(timezone.utc).isoformat()
+
+                        database.settle_trade(
+                            token_id=tok,
+                            trade_id=pt.get("trade_id"),
+                            resolved_price=sell_price,
+                            payout=payout,
+                            pnl=pnl,
+                            result=res,
+                            closed_at=closed_ts,
+                            note=note,
+                        )
+                        # Remove from state.json if present
+                        for pos_k in list(broker_inst.state.get("positions", {}).keys()):
+                            p_obj = broker_inst.state["positions"][pos_k]
+                            if str(p_obj.get("token_id")) == tok or str(p_obj.get("trade_id")) == pt.get("trade_id"):
+                                broker_inst.state["positions"].pop(pos_k, None)
+                                broker_inst.save()
+
+                        reconciled.append({
+                            "trade_id": pt.get("trade_id"),
+                            "account": session.name,
+                            "question": pt.get("question"),
+                            "outcome": pt.get("outcome"),
+                            "exit_price": sell_price,
+                            "pnl": pnl,
+                            "note": note,
+                        })
             except Exception as exc:
                 print(f"[live_broker] Reconciliation error for {session.name}: {exc}")
 
