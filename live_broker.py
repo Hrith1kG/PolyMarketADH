@@ -13,6 +13,131 @@ class LiveBrokerError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Order response interpretation.
+#
+# polymarket-client's place_limit_order() returns OrderResponse, which is
+# AcceptedOrder | RejectedOrder -- a CLOB-level rejection (unmatched,
+# not_enough_balance, market_not_ready, invalid_nonce, fok/fak_not_filled, ...)
+# comes back as RejectedOrder WITHOUT raising. And an AcceptedOrder still carries
+# status "live" | "matched" | "delayed", where only "matched" means shares
+# actually changed hands; "live" means the order is resting in the book, unfilled.
+#
+# Treating "the call didn't raise" as "the position is open" is what produced
+# locally tracked positions that don't exist on the account, so every execution
+# path below routes its response through interpret_order_response() and callers
+# key off filled_size, never off the absence of an exception.
+#
+# Amount semantics (see _compute_limit_order_amounts in the SDK):
+#   BUY  -> making_amount = USDC spent,   taking_amount = shares received
+#   SELL -> making_amount = shares sold,  taking_amount = USDC received
+# ---------------------------------------------------------------------------
+
+FILLED_STATUS = "matched"
+RESTING_STATUSES = ("live", "delayed")
+
+
+def is_no_balance_rejection(code: Optional[str], message: str) -> bool:
+    """True when a rejection means "the wallet doesn't hold this".
+
+    The SDK's error-code inference checks status first, so a balance failure that
+    the CLOB also marks "unmatched" is reported as code "unmatched" rather than
+    "not_enough_balance" -- matching on the code alone misses it. Check the message
+    too, and treat the exception text the same way (the HTTP 400 path raises).
+    """
+    if str(code or "") == "not_enough_balance":
+        return True
+    msg = str(message or "").lower()
+    return "not enough balance" in msg or "balance is not enough" in msg
+
+
+def interpret_order_response(response: Any, side: str, requested_size: float, requested_price: float) -> Dict[str, Any]:
+    """Normalizes an SDK OrderResponse into explicit fill facts.
+
+    Returns a dict with:
+      accepted      -- the exchange took the order (it may still be unfilled)
+      filled        -- shares actually changed hands
+      resting       -- accepted but sitting in the book unfilled
+      filled_size   -- shares filled (0.0 when nothing filled)
+      filled_cost   -- USDC spent (BUY) or received (SELL) for the filled portion
+      avg_price     -- realized average fill price, or the requested price as fallback
+      status/order_id/code/message -- passthrough for logging and reconciliation
+    """
+    result: Dict[str, Any] = {
+        "accepted": False,
+        "filled": False,
+        "resting": False,
+        "filled_size": 0.0,
+        "filled_cost": 0.0,
+        "avg_price": float(requested_price),
+        "status": None,
+        "order_id": None,
+        "trade_ids": (),
+        "code": None,
+        "message": "",
+        "amounts_unavailable": False,
+        "raw": response,
+    }
+
+    if response is None:
+        result["code"] = "no_response"
+        result["message"] = "Exchange returned no order response."
+        return result
+
+    # RejectedOrder -> ok is False and carries a machine-readable code.
+    if getattr(response, "ok", None) is False:
+        result["code"] = str(getattr(response, "code", "unknown"))
+        result["message"] = str(getattr(response, "message", "") or "Order rejected by exchange.")
+        return result
+
+    if getattr(response, "ok", None) is not True:
+        # Unrecognized shape: refuse to guess that it filled.
+        result["code"] = "unrecognized_response"
+        result["message"] = f"Unrecognized order response type: {type(response).__name__}"
+        return result
+
+    status = str(getattr(response, "status", "") or "").lower()
+    result["accepted"] = True
+    result["status"] = status
+    result["order_id"] = str(getattr(response, "order_id", "") or "") or None
+    result["trade_ids"] = tuple(getattr(response, "trade_ids", ()) or ())
+
+    making = float(getattr(response, "making_amount", 0.0) or 0.0)
+    taking = float(getattr(response, "taking_amount", 0.0) or 0.0)
+    if str(side).upper() == "BUY":
+        filled_size, filled_cost = taking, making
+    else:
+        filled_size, filled_cost = making, taking
+
+    if status == FILLED_STATUS:
+        result["filled"] = True
+        if filled_size > 0.0:
+            result["filled_size"] = filled_size
+            result["filled_cost"] = filled_cost if filled_cost > 0.0 else filled_size * float(requested_price)
+        else:
+            # Matched, but the response omitted the amounts (the CLOB sends "" for
+            # some fills). Fall back to what we asked for rather than dropping a real
+            # fill, and flag it so reconciliation can correct the size from on-chain
+            # trades instead of trusting this number.
+            result["filled_size"] = float(requested_size)
+            result["filled_cost"] = float(requested_size) * float(requested_price)
+            result["amounts_unavailable"] = True
+        result["avg_price"] = (result["filled_cost"] / result["filled_size"]) if result["filled_size"] > 0 else float(requested_price)
+        return result
+
+    # Accepted but not matched. A partial fill can still be reported alongside a
+    # resting remainder, so book whatever actually filled and flag the rest.
+    if filled_size > 0.0:
+        result["filled"] = True
+        result["filled_size"] = filled_size
+        result["filled_cost"] = filled_cost if filled_cost > 0.0 else filled_size * float(requested_price)
+        result["avg_price"] = result["filled_cost"] / result["filled_size"]
+    if status in RESTING_STATUSES and filled_size < float(requested_size):
+        result["resting"] = True
+        result["message"] = f"Order {status} on the book, {filled_size:.4f}/{float(requested_size):.4f} shares filled."
+    return result
+
+
 def check_credentials_available() -> Tuple[bool, str]:
     """Checks whether valid live trading credentials are set in .env or environment."""
     accounts = config.get_configured_accounts()
@@ -132,13 +257,46 @@ class AccountSession:
             print(f"[live_broker][{self.name}] Failed to list live positions: {exc}")
             return []
 
-    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None) -> Any:
-        """Places a limit buy for stake_usd shares at `price`."""
+    def get_market_order_constraints(self, token_id: str) -> Dict[str, Any]:
+        """Reads the live book for a token: minimum order size, tick size, best ask
+        and the size resting at it. Order sizing used to ignore all of this, so the
+        bot could emit orders the exchange had to reject (below minimum size), which
+        the old code then recorded as filled positions."""
+        info: Dict[str, Any] = {"min_order_size": 0.0, "tick_size": 0.0, "best_ask": None, "ask_size": 0.0}
+        try:
+            client = polymarket_client.get_public_client()
+            book = client.get_order_book(token_id=str(token_id))
+            info["min_order_size"] = float(book.min_order_size or 0.0)
+            info["tick_size"] = float(book.tick_size or 0.0)
+            if book.asks:
+                # SDK documents asks as descending price order, best (lowest) ask last.
+                info["best_ask"] = float(book.asks[-1].price)
+                info["ask_size"] = float(book.asks[-1].size)
+        except Exception as exc:
+            print(f"[live_broker][{self.name}] Could not read book for {token_id}: {exc}")
+        return info
+
+    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None) -> Dict[str, Any]:
+        """Places a limit buy sized to `stake_usd` at `price` and returns the interpreted
+        fill outcome (see interpret_order_response). Never reports a fill it didn't get."""
         stake = stake_usd if stake_usd is not None else settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE)
         # Ensure ceiling rounding and min notional >= 1.00 USD so Polymarket's min size check never fails
         size = math.ceil((float(stake) / float(price)) * 100.0) / 100.0
         if size * float(price) < 1.0:
             size = math.ceil((1.00 / float(price)) * 100.0) / 100.0
+
+        # Respect the market's own minimum order size instead of discovering it as a
+        # rejection: below-minimum orders are refused by the CLOB, and a refusal used
+        # to be booked as a filled position.
+        constraints = self.get_market_order_constraints(token_id)
+        min_size = float(constraints.get("min_order_size") or 0.0)
+        if min_size > 0 and size < min_size:
+            raise LiveBrokerError(
+                f"[{self.name}] Stake ${float(stake):.2f} at ${float(price):.4f} is {size:.2f} shares, "
+                f"below this market's {min_size:.2f}-share minimum "
+                f"(needs at least ${min_size * float(price):.2f})."
+            )
+
         try:
             response = self.client.place_limit_order(
                 token_id=token_id,
@@ -146,12 +304,17 @@ class AccountSession:
                 size=size,
                 side="BUY",
             )
-            return response
         except Exception as exc:
             raise LiveBrokerError(f"[{self.name}] Failed to place order: {exc}")
 
-    def place_sell(self, token_id: str, price: float, size: float) -> Any:
-        """Places a limit sell order for `size` shares at `price` to exit an open position."""
+        outcome = interpret_order_response(response, side="BUY", requested_size=size, requested_price=float(price))
+        outcome["requested_size"] = size
+        outcome["requested_stake"] = float(stake)
+        return outcome
+
+    def place_sell(self, token_id: str, price: float, size: float) -> Dict[str, Any]:
+        """Places a limit sell for `size` shares at `price` to exit an open position,
+        returning the interpreted fill outcome rather than a bare response."""
         size_to_sell = math.floor(float(size) * 100.0) / 100.0
         if size_to_sell <= 0:
             raise LiveBrokerError(f"[{self.name}] Invalid sell size: {size}")
@@ -162,9 +325,27 @@ class AccountSession:
                 size=size_to_sell,
                 side="SELL",
             )
-            return response
         except Exception as exc:
             raise LiveBrokerError(f"[{self.name}] Failed to place sell order: {exc}")
+
+        outcome = interpret_order_response(response, side="SELL", requested_size=size_to_sell, requested_price=float(price))
+        outcome["requested_size"] = size_to_sell
+        return outcome
+
+    def cancel_order(self, order_id: str) -> Any:
+        """Cancels one resting CLOB order. Unfilled orders used to sit in the book
+        indefinitely with nothing in the app able to clear them."""
+        try:
+            return self.client.cancel_order(order_id=str(order_id))
+        except Exception as exc:
+            raise LiveBrokerError(f"[{self.name}] Failed to cancel order {order_id}: {exc}")
+
+    def cancel_all_orders(self) -> Any:
+        """Cancels every resting CLOB order for this account."""
+        try:
+            return self.client.cancel_all()
+        except Exception as exc:
+            raise LiveBrokerError(f"[{self.name}] Failed to cancel all orders: {exc}")
 
     def redeem_winning_position(self, condition_id: Optional[str] = None, market_id: Optional[str] = None) -> Any:
         """Redeems resolved winning outcome tokens on CTF contract back to collateral."""
@@ -174,6 +355,56 @@ class AccountSession:
             return outcome
         except Exception as exc:
             raise LiveBrokerError(f"[{self.name}] Failed to redeem CTF position: {exc}")
+
+
+def _buy_result(session: "AccountSession", stake: float, outcome: Optional[Dict[str, Any]] = None, error: Optional[str] = None) -> Dict[str, Any]:
+    """Builds the per-account execution record the callers act on.
+
+    `success` now means "shares actually filled", not "the call didn't raise" --
+    callers must never open a tracked position off anything weaker than that.
+    An accepted-but-unfilled order is reported with success=False and resting=True
+    so it can be surfaced as a working order instead of a phantom position.
+    """
+    if error is not None:
+        return {
+            "account_name": session.name,
+            "wallet": session.wallet,
+            "stake": stake,
+            "success": False,
+            "accepted": False,
+            "resting": False,
+            "filled_size": 0.0,
+            "filled_cost": 0.0,
+            "avg_price": 0.0,
+            "status": None,
+            "order_id": None,
+            "response": None,
+            "error": error,
+        }
+    outcome = outcome or {}
+    filled = bool(outcome.get("filled")) and float(outcome.get("filled_size", 0.0)) > 0.0
+    if filled:
+        err = None
+    elif outcome.get("resting"):
+        err = outcome.get("message") or f"Order accepted but unfilled (status={outcome.get('status')})."
+    else:
+        err = outcome.get("message") or f"Order rejected by exchange ({outcome.get('code') or 'unknown'})."
+    return {
+        "account_name": session.name,
+        "wallet": session.wallet,
+        "stake": stake,
+        "success": filled,
+        "accepted": bool(outcome.get("accepted")),
+        "resting": bool(outcome.get("resting")),
+        "filled_size": float(outcome.get("filled_size", 0.0)),
+        "filled_cost": float(outcome.get("filled_cost", 0.0)),
+        "avg_price": float(outcome.get("avg_price", 0.0)),
+        "status": outcome.get("status"),
+        "order_id": outcome.get("order_id"),
+        "amounts_unavailable": bool(outcome.get("amounts_unavailable")),
+        "response": outcome.get("raw"),
+        "error": err,
+    }
 
 
 class LiveBroker:
@@ -282,24 +513,10 @@ class LiveBroker:
             else:
                 stake = settings_manager.get_account_stake(session.name, fallback=session.custom_stake or default_stake)
             try:
-                resp = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
-                return {
-                    "account_name": session.name,
-                    "wallet": session.wallet,
-                    "stake": stake,
-                    "success": True,
-                    "response": resp,
-                    "error": None,
-                }
+                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
+                return _buy_result(session, stake, outcome=outcome)
             except Exception as exc:
-                return {
-                    "account_name": session.name,
-                    "wallet": session.wallet,
-                    "stake": stake,
-                    "success": False,
-                    "response": None,
-                    "error": str(exc),
-                }
+                return _buy_result(session, stake, error=str(exc))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_execute_session, s) for s in self.account_list]
@@ -308,12 +525,33 @@ class LiveBroker:
 
         return results
 
-    def exit_position(self, account_name: str, token_id: str, size: float, price: float) -> Any:
-        """Dispatches a sell order to exit an open position on Polymarket CLOB for the given account."""
+    def exit_position(self, account_name: str, token_id: str, size: float, price: float) -> Dict[str, Any]:
+        """Dispatches a sell order to exit an open position on Polymarket CLOB for the
+        given account, returning the interpreted fill outcome. Callers must check
+        outcome["filled"] before booking the exit locally -- a rejected or resting
+        sell order used to be reported to the user as a completed sale."""
         session = self.sessions.get(account_name) or self.primary_session
         if not session:
             raise LiveBrokerError(f"No active session found for account '{account_name}'")
         return session.place_sell(token_id=token_id, price=price, size=size)
+
+    def cancel_order(self, order_id: str, account_name: Optional[str] = None) -> Any:
+        """Cancels a single resting order on one account (defaults to the primary)."""
+        session = self.get_session(account_name)
+        if not session:
+            raise LiveBrokerError(f"Account '{account_name}' not found.")
+        return session.cancel_order(order_id)
+
+    def cancel_all_orders(self, account_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Cancels every resting order for one account, or across all accounts."""
+        sessions = [self.get_session(account_name)] if account_name else list(self.account_list)
+        results = []
+        for sess in [x for x in sessions if x]:
+            try:
+                results.append({"account": sess.name, "success": True, "result": sess.cancel_all_orders()})
+            except Exception as exc:
+                results.append({"account": sess.name, "success": False, "error": str(exc)})
+        return results
 
     def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float]) -> List[Dict[str, Any]]:
         """Concurrently dispatches buy orders for only the given subset of accounts
@@ -328,24 +566,10 @@ class LiveBroker:
 
         def _execute_session(name: str, session: AccountSession, stake: float):
             try:
-                resp = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
-                return {
-                    "account_name": name,
-                    "wallet": session.wallet,
-                    "stake": stake,
-                    "success": True,
-                    "response": resp,
-                    "error": None,
-                }
+                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
+                return _buy_result(session, stake, outcome=outcome)
             except Exception as exc:
-                return {
-                    "account_name": name,
-                    "wallet": session.wallet,
-                    "stake": stake,
-                    "success": False,
-                    "response": None,
-                    "error": str(exc),
-                }
+                return _buy_result(session, stake, error=str(exc))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_execute_session, name, session, account_stakes[name]) for name, session in sessions]
@@ -371,10 +595,67 @@ class LiveBroker:
                 outcomes.append({"account": s.name, "success": False, "error": str(e)})
         return outcomes
 
+    def _resolved_price_for_token(self, market_id: Optional[str], token_id: str) -> Tuple[Optional[float], str]:
+        """Returns (settlement_price, reason) for one outcome token, or (None, reason)
+        when the true outcome cannot be established.
+
+        The previous version settled at 1.0 whenever UMA reported the *market* as
+        resolved, regardless of whether *our* token was the winning side, and fell
+        back to "entry price was high, so assume it won". Both fabricated wins. This
+        returns None instead, and callers leave the trade PENDING."""
+        if not market_id:
+            return None, "no market id recorded for this trade"
+        try:
+            pub_client = polymarket_client.get_public_client()
+            m = pub_client.get_market(id=str(market_id))
+        except Exception as exc:
+            return None, f"market lookup failed: {exc}"
+
+        if not m or not m.state:
+            return None, "market lookup returned no state"
+
+        raw_p = None
+        if m.outcomes:
+            for oc in [m.outcomes.yes, m.outcomes.no]:
+                if oc and oc.token_id and str(oc.token_id) == str(token_id):
+                    if oc.price is not None:
+                        raw_p = float(oc.price)
+                    break
+
+        uma_status = str(m.resolution.uma_resolution_status).lower() if (m.resolution and m.resolution.uma_resolution_status) else ""
+        is_uma_resolved = "resolved" in uma_status
+
+        if raw_p is None:
+            # Resolved or not, without a price for OUR token there is no basis on
+            # which to decide whether this side won.
+            return None, "no price available for this outcome token"
+
+        if is_uma_resolved:
+            return (1.0 if raw_p >= 0.5 else 0.0), ("resolved (win)" if raw_p >= 0.5 else "resolved (loss)")
+
+        if m.state.closed and (raw_p >= 0.95 or raw_p <= 0.05):
+            return (1.0 if raw_p >= 0.5 else 0.0), ("closed at winning price" if raw_p >= 0.5 else "closed at losing price")
+
+        if m.state.closed:
+            return raw_p, f"market closed at ${raw_p:.4f}"
+
+        return None, "market is still open"
+
     def reconcile_positions(self, account_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Compares pending live trades in local SQLite against actual on-chain positions
-        and Polymarket trade history. If a trade was closed/exited directly on Polymarket,
-        settles it in SQLite with the actual fill price and books P&L."""
+        """Compares pending live trades in local SQLite against actual on-chain
+        positions and Polymarket trade history, and corrects the local record.
+
+        Three distinct cases, which the previous version collapsed into "assume it won":
+
+        1. The token is still held on-chain -> leave it PENDING, nothing to do.
+        2. It was sold, or the market resolved and we can read the outcome for OUR
+           token -> settle at the real price and book the real P&L.
+        3. It was never bought on-chain at all (no BUY trade, no balance) -> the order
+           never filled, so the local row is a phantom. VOID it: no payout, no P&L,
+           and drop it from state.json. This is what clears positions the bot recorded
+           from rejected or never-filled orders.
+
+        Anything fitting none of these is left PENDING with a note rather than guessed at."""
         import database
         import paper_broker
         reconciled = []
@@ -388,17 +669,25 @@ class LiveBroker:
                 on_chain_pos = session.get_live_positions()
                 held_token_ids = {str(p.get("token_id")) for p in on_chain_pos if float(p.get("size", 0.0)) > 0.0}
 
-                # 2. Query recent trades on-chain for this wallet
-                on_chain_trades_paginator = session.client.list_trades(user=session.wallet, page_size=50)
-                sell_trades_by_token = {}
+                # 2. Query recent trades on-chain, keeping both sides: the SELL gives
+                #    the exit price, and the *absence* of a BUY tells us the entry
+                #    never actually happened.
+                on_chain_trades_paginator = session.client.list_trades(user=session.wallet, page_size=100)
+                sell_trades_by_token: Dict[str, Any] = {}
+                bought_token_ids = set()
                 for tr in on_chain_trades_paginator.iter_items():
-                    if str(tr.side).upper() == "SELL":
-                        tok = str(tr.asset_id or "")
-                        if tok and tok not in sell_trades_by_token:
+                    tok = str(tr.asset_id or "")
+                    if not tok:
+                        continue
+                    side = str(tr.side).upper()
+                    if side == "SELL":
+                        if tok not in sell_trades_by_token:
                             sell_trades_by_token[tok] = tr
+                    elif side == "BUY":
+                        bought_token_ids.add(tok)
 
                 # 3. Find pending live trades in SQLite for this account/wallet
-                db_trades = database.get_all_trades(broker_filter="live", limit=200)
+                db_trades = database.get_all_trades(broker_filter="live", limit=500)
                 pending = [
                     t for t in db_trades
                     if str(t.get("result", "")).upper() == "PENDING"
@@ -407,90 +696,76 @@ class LiveBroker:
 
                 for pt in pending:
                     tok = str(pt.get("token_id", ""))
-                    if not tok:
-                        continue
-                    # If token is no longer held in wallet
-                    if tok not in held_token_ids:
-                        matching_sell = sell_trades_by_token.get(tok)
-                        if matching_sell:
-                            sell_price = float(matching_sell.price or 0.0)
-                            sell_tokens = float(matching_sell.size or pt.get("tokens", 0.0))
-                            tokens_held = float(pt.get("tokens") or sell_tokens)
-                            cost = float(pt.get("cost") or 0.0)
-                            payout = tokens_held * sell_price
-                            pnl = payout - cost
-                            res = "WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN")
-                            closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
-                            note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
-                        else:
-                            # Token is not held in wallet, but no direct CLOB limit sell trade found.
-                            # This occurs when:
-                            # 1) The market resolved and winnings were redeemed on Polymarket
-                            # 2) The market closed/expired
-                            # 3) The position was sold via an AMM/relayer or outside the recent 50 trades
-                            m_id = pt.get("market_id")
-                            sell_price = None
-                            if m_id:
-                                try:
-                                    pub_client = polymarket_client.get_public_client()
-                                    m = pub_client.get_market(id=str(m_id))
-                                    if m and m.state:
-                                        uma_status = str(m.resolution.uma_resolution_status).lower() if (m.resolution and m.resolution.uma_resolution_status) else ""
-                                        is_uma = "resolved" in uma_status
-                                        raw_p = None
-                                        if m.outcomes:
-                                            for oc in [m.outcomes.yes, m.outcomes.no]:
-                                                if oc and oc.token_id and str(oc.token_id) == tok:
-                                                    if oc.price is not None:
-                                                        raw_p = float(oc.price)
-                                                    break
-                                        if is_uma or (m.state.closed and raw_p is not None and (raw_p >= 0.95 or raw_p <= 0.05)):
-                                            sell_price = 1.0 if (raw_p is not None and raw_p >= 0.5) or is_uma else 0.0
-                                        elif m.state.closed and raw_p is not None:
-                                            sell_price = raw_p
-                                except Exception as m_chk_err:
-                                    print(f"[live_broker] Resolution check notice for market {m_id}: {m_chk_err}")
+                    if not tok or tok in held_token_ids:
+                        continue  # still held on-chain: nothing to reconcile
 
-                            if sell_price is None:
-                                entry_p = float(pt.get("entry_price") or 0.95)
-                                sell_price = 1.0 if entry_p >= 0.90 else 0.0
-                                note = f"Closed on Polymarket (0 on-chain balance / redeemed) @ ${sell_price:.2f}"
-                            else:
-                                note = f"Resolved on Polymarket (0 on-chain balance) @ ${sell_price:.4f}"
+                    tokens_held = float(pt.get("tokens") or 0.0)
+                    cost = float(pt.get("cost") or 0.0)
+                    matching_sell = sell_trades_by_token.get(tok)
 
-                            tokens_held = float(pt.get("tokens") or 0.0)
-                            cost = float(pt.get("cost") or 0.0)
-                            payout = tokens_held * sell_price
-                            pnl = payout - cost
-                            res = "WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN")
-                            closed_ts = datetime.now(timezone.utc).isoformat()
-
-                        database.settle_trade(
-                            token_id=tok,
-                            trade_id=pt.get("trade_id"),
-                            resolved_price=sell_price,
-                            payout=payout,
-                            pnl=pnl,
-                            result=res,
-                            closed_at=closed_ts,
-                            note=note,
-                        )
-                        # Remove from state.json if present
-                        for pos_k in list(broker_inst.state.get("positions", {}).keys()):
-                            p_obj = broker_inst.state["positions"][pos_k]
-                            if str(p_obj.get("token_id")) == tok or str(p_obj.get("trade_id")) == pt.get("trade_id"):
-                                broker_inst.state["positions"].pop(pos_k, None)
-                                broker_inst.save()
-
+                    if matching_sell:
+                        sell_price = float(matching_sell.price or 0.0)
+                        sold_size = float(matching_sell.size or 0.0)
+                        if sold_size > 0:
+                            tokens_held = sold_size
+                        payout = tokens_held * sell_price
+                        pnl = payout - cost
+                        res = database.classify_result(pnl)
+                        closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
+                        note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
+                    elif tok not in bought_token_ids:
+                        # Never acquired on-chain: the order behind this row never
+                        # filled. Void it rather than inventing a win or a loss.
+                        void_note = "Voided: order never filled on Polymarket (no on-chain buy, no balance)"
+                        database.void_trade(pt.get("trade_id"), note=void_note)
+                        broker_inst.discard_position(pt.get("trade_id") or tok, note=void_note)
                         reconciled.append({
                             "trade_id": pt.get("trade_id"),
                             "account": session.name,
                             "question": pt.get("question"),
                             "outcome": pt.get("outcome"),
-                            "exit_price": sell_price,
-                            "pnl": pnl,
-                            "note": note,
+                            "exit_price": None,
+                            "pnl": 0.0,
+                            "voided": True,
+                            "note": void_note,
                         })
+                        continue
+                    else:
+                        # Bought at some point, no balance now, no SELL in recent
+                        # history: most likely resolved and redeemed. Only settle if
+                        # the actual outcome for this token can be read.
+                        sell_price, reason = self._resolved_price_for_token(pt.get("market_id"), tok)
+                        if sell_price is None:
+                            print(f"[live_broker] Leaving {pt.get('trade_id')} PENDING -- {reason}")
+                            continue
+                        payout = tokens_held * sell_price
+                        pnl = payout - cost
+                        res = database.classify_result(pnl)
+                        closed_ts = datetime.now(timezone.utc).isoformat()
+                        note = f"Reconciled from Polymarket: {reason} @ ${sell_price:.4f}"
+
+                    database.settle_trade(
+                        token_id=tok,
+                        trade_id=pt.get("trade_id"),
+                        resolved_price=sell_price,
+                        payout=payout,
+                        pnl=pnl,
+                        result=res,
+                        closed_at=closed_ts,
+                        note=note,
+                    )
+                    broker_inst.discard_position(pt.get("trade_id") or tok, note=note, closed_price=sell_price)
+
+                    reconciled.append({
+                        "trade_id": pt.get("trade_id"),
+                        "account": session.name,
+                        "question": pt.get("question"),
+                        "outcome": pt.get("outcome"),
+                        "exit_price": sell_price,
+                        "pnl": pnl,
+                        "voided": False,
+                        "note": note,
+                    })
             except Exception as exc:
                 print(f"[live_broker] Reconciliation error for {session.name}: {exc}")
 

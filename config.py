@@ -141,9 +141,17 @@ def _read_env_lines(path: str = None) -> list:
 def _write_env_lines(lines: list, path: str = None) -> None:
     path = path or ENV_FILE
     tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
+    # This file holds private keys. Create it 0600 before writing so the keys are
+    # never briefly readable by other users on the machine (the previous version
+    # wrote at the process umask, typically 0644).
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.writelines(lines)
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # best effort: some filesystems (e.g. Windows shares) don't support it
 
 
 def _set_env_var(lines: list, key: str, value: str) -> list:

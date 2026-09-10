@@ -3,6 +3,36 @@
 Audit of `main.py`, `scanner.py`, `paper_broker.py`, `live_broker.py`, `database.py`,
 `settings_manager.py`, `config.py` and `dashboard.py` against `polymarket-client` 0.10.0.
 
+## Status
+
+Everything below has been fixed. Regression tests covering the behaviour live in
+`tests/` — run `./tests/run_all.sh` (needs `.venv` with `requirements.txt` installed).
+
+| ID | Finding | Status |
+|----|---------|--------|
+| C1 | Positions booked on submission, not fill | Fixed — `interpret_order_response` |
+| C2 | Exit path never cleared `state.json` | Fixed — shared `execute_exit` |
+| C3 | Bot resurrected deleted positions | Fixed — state lock + `reload()` |
+| C4 | UMA-resolved markets booked as wins | Fixed |
+| C5 | 10h-elapsed positions auto-settled at 1.0 | Fixed — left PENDING and flagged |
+| C6 | Reconciliation invented wins; ran on every render | Fixed — VOID path, explicit trigger only |
+| H1 | Live exits not fill-verified | Fixed |
+| H2 | Manual trigger bypassed kill switch / could leave orders untracked | Fixed |
+| H3 | Simulated balance gated live trades | Fixed |
+| H4 | Non-unique `trade_id` overwrote history | Fixed |
+| H5 | No way to cancel resting orders | Fixed — cancel controls in Control and Risk |
+| H6 | Reset deleted LIVE position tracking | Fixed — `reset_paper_portfolio()` |
+| H7 | `max_slippage` / `require_high_confidence` did nothing | Fixed — both wired up |
+| M1–M12 | See table below | Fixed, except M12 (see note) |
+
+Also fixed along the way: the History screen crashed with
+`NameError: active_trades_for_table` whenever LIVE mode was selected without valid
+credentials.
+
+**M12 (uncached `get_market` per position per loop) is not addressed.** It is a rate-limit
+risk rather than a correctness bug, and the settlement path it feeds now fails safe:
+a throttled lookup leaves the position PENDING instead of settling it as a win.
+
 ---
 
 ## Part 1 — Why the dashboard shows 10 open positions that don't exist on the account

@@ -10,18 +10,13 @@ import config
 DB_FILE = os.getenv("TRADES_DB_FILE", "trades.db")
 
 
-_SLUG_CACHE: Dict[str, str] = {
-    "3856086": "bra2-pop-ber-2026-09-06-pop",
-    "3889501": "cfb-boise-ore-2026-09-05",
-    "3799418": "ukr1-met-obo-2026-09-05-obo",
-    "3832912": "lal-val-bar-2026-09-06-val",
-    "3889513": "cfb-marsh-pennst-2026-09-05",
-    "3792005": "bun-s04-bay-2026-09-05-s04",
-    "3792014": "epl-mac-cov-2026-09-05-cov",
-    "3889428": "cfb-ecar-ala-2026-09-05",
-    "3889431": "cfb-ntx-ind-2026-09-05",
-    "3889700": "cfb-msvlst-sacst-2026-09-05",
-}
+_SLUG_CACHE: Dict[str, str] = {}
+"""Runtime memo of market_id -> URL slug, populated from the API on first lookup.
+
+This used to be seeded with ten hard-coded market IDs captured during an earlier
+session, and init_db() re-applied them to any trade row with a matching market_id
+on every call -- stale fixture data writing itself into live records.
+"""
 
 
 def resolve_market_slug(market_id: Optional[str] = None) -> str:
@@ -60,13 +55,41 @@ def get_polymarket_url(slug: Optional[str] = None, market_id: Optional[str] = No
     return "https://polymarket.com"
 
 
+# Floating-point payout math (shares * price) routinely lands a cent-fraction either
+# side of zero on a flat exit, which used to be recorded as a WIN or a LOSS depending
+# on the sign of the noise. Anything inside half a cent is a break-even.
+PNL_EPSILON = 0.005
+
+
+def classify_result(pnl: float) -> str:
+    """Single definition of WON / LOST / EVEN, so state.json, trades.db and the
+    dashboard can't disagree about what a break-even trade is."""
+    if pnl > PNL_EPSILON:
+        return "WON"
+    if pnl < -PNL_EPSILON:
+        return "LOST"
+    return "EVEN"
+
+
 def get_connection(db_path: str = DB_FILE) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db(db_path: str = DB_FILE) -> None:
+_INITIALISED_DBS: set = set()
+
+
+def init_db(db_path: str = DB_FILE, force: bool = False) -> None:
+    """Creates the schema and applies migrations. Runs once per database per process.
+
+    Every record/settle/query call invokes this, and it was re-running three
+    ALTER TABLEs, four CREATE INDEXes and a batch of UPDATEs each time -- pure
+    overhead on every dashboard rerun.
+    """
+    if not force and db_path in _INITIALISED_DBS:
+        return
+    _INITIALISED_DBS.add(db_path)
     with get_connection(db_path) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -105,13 +128,6 @@ def init_db(db_path: str = DB_FILE) -> None:
             conn.execute("ALTER TABLE trades ADD COLUMN wallet_address TEXT")
         except sqlite3.OperationalError:
             pass
-
-        # Backfill slug for any cached markets
-        for mid, s_val in _SLUG_CACHE.items():
-            conn.execute(
-                "UPDATE trades SET slug = ? WHERE market_id = ? AND (slug IS NULL OR slug = '')",
-                (s_val, mid)
-            )
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_placed_at ON trades(placed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_token_id ON trades(token_id)")
@@ -266,6 +282,31 @@ def force_settle_orphaned_trade(trade_id: str, won: bool, note: str = "", db_pat
     )
 
 
+def void_trade(trade_id: str, note: str = "", db_path: str = DB_FILE) -> bool:
+    """Marks a trade VOID: it was recorded locally but never actually executed on
+    Polymarket (a rejected or never-filled order). A void books no payout and no
+    P&L -- it is not a loss, it simply never happened -- so it must never be
+    settled as WON/LOST, which would corrupt the win rate and realized P&L."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            UPDATE trades
+            SET result = 'VOID',
+                resolved_price = NULL,
+                payout = 0.0,
+                pnl = 0.0,
+                closed_at = ?,
+                note = ?
+            WHERE trade_id = ?
+        """, (
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            note or "Voided: order never executed on Polymarket",
+            trade_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def exit_orphaned_trade(trade_id: str, exit_price: float, note: str = "", db_path: str = DB_FILE) -> bool:
     """Settles a PENDING trade directly in SQLite using a specified exit_price,
     booking actual P&L."""
@@ -286,7 +327,7 @@ def exit_orphaned_trade(trade_id: str, exit_price: float, note: str = "", db_pat
         resolved_price=resolved_price,
         payout=payout,
         pnl=pnl,
-        result="WON" if pnl > 0 else ("LOST" if pnl < 0 else "EVEN"),
+        result=classify_result(pnl),
         closed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         note=note or f"Manual exit @ ${resolved_price:.4f}",
         db_path=db_path,

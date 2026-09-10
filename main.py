@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+from typing import Tuple
 
 import config
 import scanner
@@ -40,6 +41,29 @@ def _broad_scan_settings(global_settings, accounts):
     return broad
 
 
+def _slippage_ok(live, opp, max_slippage: float) -> Tuple[bool, str]:
+    """Re-checks the live best ask immediately before firing and refuses the entry if
+    the price has run away from the quote the signal was built on.
+
+    `max_slippage` was configurable in the dashboard and documented in the README but
+    read by nothing -- there was no slippage control at any point in the pipeline.
+    """
+    if not max_slippage or max_slippage <= 0:
+        return True, ""
+    try:
+        constraints = live.primary_session.get_market_order_constraints(opp.token_id)
+    except Exception as exc:
+        return True, f"slippage check skipped ({exc})"
+
+    best_ask = constraints.get("best_ask")
+    if best_ask is None:
+        return False, "no live ask in the book to price against"
+    drift = float(best_ask) - float(opp.confirmed_price)
+    if drift > max_slippage:
+        return False, f"price moved {drift:+.4f} (ask ${best_ask:.4f} vs quote ${opp.confirmed_price:.4f}), over the ${max_slippage:.4f} slippage cap"
+    return True, ""
+
+
 def _opportunity_matches_account(opp, acc_settings) -> bool:
     price_min = acc_settings.get("price_min")
     price_max = acc_settings.get("price_max")
@@ -66,6 +90,12 @@ def run():
 
     while True:
         try:
+            # Re-read state.json before doing anything. This loop holds one PaperBroker
+            # for the life of the process and save() serialises the whole state dict, so
+            # without this the bot kept overwriting the file from a snapshot taken before
+            # the dashboard's exits/settlements -- silently resurrecting closed positions.
+            broker.reload()
+
             settings = settings_manager.load_settings()
             status = settings.get("bot_status", "RUNNING")
             manual_trigger = settings.get("manual_scan_requested", False)
@@ -175,30 +205,64 @@ def run():
                             if not eligible_stakes:
                                 continue
 
+                            slip_ok, slip_reason = _slippage_ok(live, opp, float(settings.get("max_slippage", 0.005) or 0.0))
+                            if not slip_ok:
+                                for _ in eligible_stakes:
+                                    broker.record_intention()
+                                    broker.record_rejection()
+                                log(f"SKIP      {opp.question[:40]!r} [{opp.outcome_label}] -- {slip_reason}")
+                                broker.add_log(f"Entry blocked by slippage guard: {opp.question[:40]} -- {slip_reason}", level="WARNING")
+                                continue
+
                             results = live.place_buy_selected(opp.token_id, opp.confirmed_price, eligible_stakes)
                             for res in results:
                                 acc_name = res["account_name"]
                                 wallet_addr = res["wallet"]
                                 stake_used = res["stake"]
 
+                                # res["success"] now means shares actually filled. An
+                                # order the exchange merely accepted (resting in the
+                                # book) or rejected outright must NOT become a tracked
+                                # position -- that is what produced local positions
+                                # with nothing behind them on the account.
                                 if res["success"]:
-                                    log(f"LIVE BUY [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] "
-                                        f"@ {opp.confirmed_price:.3f} (${stake_used}) -> {res['response']}")
+                                    log(f"LIVE FILL [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] "
+                                        f"{res['filled_size']:.2f} shares @ {res['avg_price']:.4f} "
+                                        f"(cost ${res['filled_cost']:.2f}, order {res.get('order_id')})")
                                     acc_settings = settings_manager.get_account_settings(acc_name)
                                     limits = {
                                         "max_open_positions": acc_settings.get("max_open_positions"),
                                         "max_total_exposure": acc_settings.get("max_total_exposure"),
                                         "max_trades_per_day": acc_settings.get("max_trades_per_day"),
                                     }
-                                    pos, _ = broker.open_position(
+                                    pos, book_reason = broker.open_position(
                                         opp,
                                         stake=stake_used,
                                         mode="LIVE",
                                         account_name=acc_name,
                                         wallet_address=wallet_addr,
                                         limits=limits,
+                                        filled_size=res["filled_size"],
+                                        fill_price=res["avg_price"],
+                                        order_id=res.get("order_id"),
+                                        # The shares are already ours; refusing to record
+                                        # them would leave real exposure untracked.
+                                        force=True,
+                                    )
+                                    if pos is None:
+                                        log(f"LIVE TRACK FAIL [{acc_name}] -- {book_reason}")
+                                        broker.add_log(f"Filled order could not be tracked [{acc_name}]: {book_reason}", level="ERROR")
+                                elif res["resting"]:
+                                    broker.record_unfilled()
+                                    log(f"LIVE OPEN [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] -- {res['error']}")
+                                    broker.add_log(
+                                        f"Order resting unfilled [{acc_name}] (order {res.get('order_id')}): "
+                                        f"{opp.question[:40]}. Not tracked as a position; cancel it from the "
+                                        f"dashboard if you no longer want the entry.",
+                                        level="WARNING",
                                     )
                                 else:
+                                    broker.record_rejection()
                                     log(f"LIVE ERR [{acc_name}] {opp.question[:45]!r} [{opp.outcome_label}] -- {res['error']}")
                                     broker.add_log(f"Live order failed [{acc_name}]: {res['error']}", level="ERROR")
                     else:

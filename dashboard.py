@@ -495,8 +495,15 @@ def fetch_on_chain_wallet_data(address: str):
 def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
     """Renders the 'Realized P&L, Last 10 Trades' bar chart (green wins / red losses)
     using Altair so per-bar coloring stays a native chart, not raw HTML."""
-    closed = [t for t in trades_for_chart if "PENDING" not in str(t.get("result", "")).upper()]
-    last10 = closed[-10:]
+    # get_all_trades() returns newest-first (ORDER BY placed_at DESC), so the last 10
+    # are the HEAD of the list -- [-10:] was rendering the ten oldest trades under a
+    # "Last 10" label. Reverse the slice so the chart reads left-to-right in time.
+    closed = [
+        t for t in trades_for_chart
+        if "PENDING" not in str(t.get("result", "")).upper()
+        and str(t.get("result", "")).upper() != "VOID"
+    ]
+    last10 = list(reversed(closed[:10]))
     if not last10:
         st.info("No settled trades yet to chart.")
         return
@@ -506,7 +513,7 @@ def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
         rows.append({
             "idx": i + 1,
             "pnl": pnl_val,
-            "outcome": "Win" if pnl_val >= 0 else "Loss",
+            "outcome": "Win" if database.classify_result(pnl_val) == "WON" else "Loss",
             "question": str(t.get("question", ""))[:40],
         })
     df = pd.DataFrame(rows)
@@ -576,6 +583,183 @@ def _cached_account_vitals(account_name):
         return None
     session = inst.get_session(account_name)
     return session.get_account_vitals() if session else None
+
+
+# ---------------------------------------------------------------------------
+# Shared exit handler.
+#
+# The Overview and History screens each had their own near-identical copy of this
+# logic, and both shared the same two defects: they treated "the sell call didn't
+# raise" as "the position is sold", and their fallback path wrote only to
+# trades.db -- leaving the state.json position in place, so an exited position
+# kept reappearing under Open Positions no matter how many times you exited it.
+# One implementation now, and every branch clears BOTH stores or clears neither.
+# ---------------------------------------------------------------------------
+
+def render_open_orders(orders, account_name=None, key_prefix="orders"):
+    """Renders resting CLOB orders with per-order and bulk cancel controls.
+
+    Unfilled limit orders used to sit in the book indefinitely with nothing in the
+    app able to clear them -- and, because orders are no longer booked as positions
+    unless they fill, this is now the only place a working order is visible.
+    """
+    st.dataframe(pd.DataFrame(orders), hide_index=True)
+    st.caption(
+        "These orders are resting on the book and are **not** tracked as positions. "
+        "They can still fill later, at a price the strategy may no longer want."
+    )
+    cancel_cols = st.columns([1.4, 1])
+    with cancel_cols[0]:
+        order_labels = {
+            f"{o.get('account')} · {o.get('side')} {float(o.get('size', 0)):.2f} @ ${float(o.get('price', 0)):.4f} · {str(o.get('id'))[:14]}": o
+            for o in orders
+        }
+        chosen = st.selectbox("Order to cancel", list(order_labels.keys()), key=f"{key_prefix}_cancel_pick")
+    with cancel_cols[1]:
+        st.write("")
+        if st.button("Cancel Order", icon=":material/cancel:", key=f"{key_prefix}_cancel_one", width="stretch"):
+            target = order_labels[chosen]
+            inst = live_broker.get_live_broker()
+            try:
+                inst.cancel_order(str(target.get("id")), account_name=target.get("account"))
+                _cached_live_open_orders.clear()
+                st.success("Order cancelled.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not cancel order: {exc}")
+
+    confirm_key = f"{key_prefix}_confirm_cancel_all"
+    if st.session_state.get(confirm_key):
+        if st.button("Confirm: cancel ALL resting orders", type="primary", key=f"{key_prefix}_cancel_all_go", width="stretch"):
+            inst = live_broker.get_live_broker()
+            results = inst.cancel_all_orders(account_name)
+            st.session_state.pop(confirm_key, None)
+            _cached_live_open_orders.clear()
+            failed = [r for r in results if not r.get("success")]
+            if failed:
+                st.error("Some accounts failed: " + "; ".join(f"{r['account']}: {r.get('error')}" for r in failed))
+            else:
+                st.success("Cancelled all resting orders.")
+            st.rerun()
+    else:
+        if st.button("Cancel All Resting Orders", icon=":material/delete_sweep:", key=f"{key_prefix}_cancel_all", width="stretch"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+
+
+def is_settled_trade(trade) -> bool:
+    """A row that represents a real, completed trade.
+
+    VOID rows were recorded locally but never executed on Polymarket, so they are
+    neither open nor a win/loss -- counting them as settled would put a zero-P&L
+    non-event into the win-rate denominator.
+    """
+    result = str(trade.get("result", "")).upper()
+    return "PENDING" not in result and result != "VOID"
+
+
+def execute_exit(position_key, position, exit_price, key_prefix=""):
+    """Exits one position. Returns True when the caller should st.rerun()."""
+    mode = str(position.get("mode", execution_mode_str)).upper()
+    trade_id = position.get("trade_id")
+    token_id = str(position.get("token_id", position_key))
+    account_name = position.get("account_name", config.DEFAULT_ACCOUNT_NAME)
+    shares_held = float(position.get("shares") or 0.0)
+    invested = float(position.get("stake", 0.0))
+
+    def _settle_locally(price, note):
+        """Books the exit in state.json and trades.db together."""
+        booked = broker.exit_position(position_key, exit_price=price, note=note)
+        if booked is None and trade_id:
+            # No matching state.json position (already gone): settle the DB row alone.
+            database.exit_orphaned_trade(trade_id, exit_price=price, note=note)
+        elif trade_id:
+            database.exit_orphaned_trade(trade_id, exit_price=price, note=note)
+        _cached_all_trades.clear()
+
+    def _clear_phantom(note):
+        """Drops a position that isn't real, from both stores."""
+        broker.discard_position(trade_id or token_id, note=note)
+        if trade_id:
+            database.void_trade(trade_id, note=note)
+        _cached_all_trades.clear()
+
+    if mode != "LIVE":
+        note = f"Manual Paper Exit @ ${exit_price:.4f}"
+        _settle_locally(exit_price, note)
+        st.success(f"Closed paper trade at ${exit_price:.4f}.")
+        return True
+
+    live_inst = live_broker.get_live_broker()
+    if not live_inst:
+        st.error("Live broker not ready. Check credentials in Control and Risk.")
+        return False
+
+    try:
+        with st.spinner(f"Submitting sell order on CLOB for {account_name}..."):
+            outcome = live_inst.exit_position(account_name, token_id, size=shares_held, price=exit_price)
+    except Exception as ex:
+        if live_broker.is_no_balance_rejection(None, str(ex)):
+            return _reconcile_after_failed_exit(live_inst, account_name, trade_id, token_id, _clear_phantom)
+        st.error(f"Failed to exit on-chain: {ex}")
+        return False
+
+    # Only an actual fill closes the position locally.
+    if outcome.get("filled") and float(outcome.get("filled_size", 0.0)) > 0:
+        fill_price = float(outcome.get("avg_price") or exit_price)
+        filled_size = float(outcome["filled_size"])
+        realized = filled_size * fill_price
+        note = f"Manual Live Exit @ ${fill_price:.4f}"
+        if filled_size + 1e-9 < shares_held:
+            st.warning(
+                f"Partial fill: {filled_size:.2f} of {shares_held:.2f} shares sold at "
+                f"${fill_price:.4f}. Booking the full position at the realized price; "
+                f"run Sync to correct the remainder against on-chain balances."
+            )
+        _settle_locally(fill_price, note)
+        st.success(f"Sold {filled_size:.2f} shares at ${fill_price:.4f} (${realized:.2f}). Position closed.")
+        return True
+
+    if outcome.get("resting"):
+        st.warning(
+            f"Sell order accepted but resting unfilled on the book "
+            f"(order {outcome.get('order_id')}). The position is still open and has "
+            f"NOT been closed locally. Lower the exit price to cross the spread, or "
+            f"cancel the order from Control and Risk."
+        )
+        return False
+
+    code = str(outcome.get("code") or "")
+    if live_broker.is_no_balance_rejection(code, outcome.get("message", "")):
+        return _reconcile_after_failed_exit(live_inst, account_name, trade_id, token_id, _clear_phantom)
+
+    st.error(f"Exchange rejected the sell order ({code or 'unknown'}): {outcome.get('message')}")
+    return False
+
+
+def _reconcile_after_failed_exit(live_inst, account_name, trade_id, token_id, clear_phantom):
+    """The wallet holds none of this token. Ask Polymarket what actually happened
+    instead of assuming an outcome."""
+    with st.spinner("No on-chain balance for this token. Checking Polymarket records..."):
+        reconciled = live_inst.reconcile_positions(account_name)
+    _cached_all_trades.clear()
+    if reconciled:
+        first = reconciled[0]
+        if first.get("voided"):
+            st.warning(f"This position was never actually filled on Polymarket. Voided: {first.get('note')}")
+        else:
+            st.success(f"Reconciled against Polymarket: {first.get('note')} (P&L ${first.get('pnl', 0.0):+.2f})")
+        return True
+
+    # Reconciliation could not establish an outcome. The wallet holds nothing, so
+    # this row cannot be an open position -- void it in BOTH stores rather than
+    # settling it as a loss (the old behaviour) or leaving it stuck in state.json.
+    clear_phantom("Voided: no on-chain balance and no matching Polymarket trade")
+    st.warning(
+        "No on-chain balance and no matching Polymarket trade for this position, so "
+        "it was never actually executed. Removed from tracking as VOID (no P&L booked)."
+    )
+    return True
 
 
 broker = get_broker()
@@ -848,11 +1032,24 @@ def build_gates_data():
     daily_limit = int(settings.get("max_trades_per_day", 10))
     exposure_limit = float(settings.get("max_total_exposure", 200.0))
     cooldown = int(settings.get("poll_interval_seconds", 60))
+    slippage = float(settings.get("max_slippage", 0.005) or 0.0)
+    late_game_on = bool(settings.get("late_game_enabled", False))
+    min_hours = float(settings.get("min_hours_to_resolution", 1.0))
+    late_threshold = int(settings.get("late_game_threshold_seconds", 600))
     return [
         {"Rule": "Probability Floor Threshold", "Value": f"= {p_floor:.2f}%", "Status": "ENFORCED"},
         {"Rule": "Probability Ceiling Threshold", "Value": f"= {p_ceil:.2f}%", "Status": "ENFORCED"},
         {"Rule": "Daily Trades Limit", "Value": f"≤ {daily_limit}", "Status": "ENFORCED"},
         {"Rule": "Max Total Exposure", "Value": f"≤ ${exposure_limit:,.2f}", "Status": "ENFORCED"},
+        {"Rule": "Max Entry Slippage", "Value": f"≤ ${slippage:.4f} vs quote" if slippage > 0 else "OFF", "Status": "ENFORCED" if slippage > 0 else "DISABLED"},
+        {"Rule": "Fill Verification", "Value": "Positions booked on fill only", "Status": "ENFORCED"},
+        # Late Game replaces the resolution-window floor rather than stacking with it,
+        # so report which one is actually in force instead of always showing min_hours.
+        {
+            "Rule": "Resolution Window Floor",
+            "Value": f"Late Game: ≤ {late_threshold}s to resolve" if late_game_on else f"≥ {min_hours:g}h to resolve",
+            "Status": "ENFORCED",
+        },
         {"Rule": "Cooldown Timer / Loop Interval", "Value": f"{cooldown}s", "Status": "ENFORCED"},
         {"Rule": "Entry Kill Switch", "Value": "ACTIVE" if kill_switch_active else "ARMED", "Status": "ENFORCED"},
         {"Rule": "Sports Moneyline Filter", "Value": "Tag 100639 / ML", "Status": "ENFORCED"},
@@ -869,10 +1066,10 @@ with tab_overview:
     # Merge positions from state.json and pending trades from trades.db so nothing is missed
     all_known_positions = dict(state.get("positions", {}))
     try:
-        if execution_mode_str.upper() == "LIVE":
-            live_inst = live_broker.get_live_broker()
-            if live_inst:
-                live_inst.reconcile_positions()
+        # Reconciliation is NOT run here. It performs on-chain writes to the local
+        # books (settling and voiding trades), and running it on every Streamlit
+        # rerun meant it fired on page load and on every widget interaction. It is
+        # now only triggered explicitly, by the Sync and Refresh buttons.
         db_pending = [t for t in database.get_all_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
         existing_tokens = {str(p.get("token_id")) for p in all_known_positions.values()}
         for pt in db_pending:
@@ -940,7 +1137,11 @@ with tab_overview:
                 opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
                 broker.save_signals(opps)
                 broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
-            st.success(f"Scan complete! Found {len(opps)} signals.")
+            # A failed scan used to be indistinguishable from an empty one.
+            if scanner.LAST_SCAN_ERROR:
+                st.error(f"Scan failed: {scanner.LAST_SCAN_ERROR}. Results below may be incomplete.")
+            else:
+                st.success(f"Scan complete! Found {len(opps)} signals.")
             st.rerun()
 
     # --- Metrics row ---
@@ -1012,6 +1213,18 @@ with tab_overview:
                 },
                 hide_index=True,
             )
+            # Positions whose outcome could not be confirmed are now left PENDING and
+            # flagged, rather than being auto-settled as wins.
+            blocked = [p for p in positions.values() if p.get("settlement_blocked")]
+            if blocked:
+                with st.container(border=True):
+                    st.warning(
+                        f"{len(blocked)} position(s) are past their resolution deadline but their "
+                        f"outcome could not be confirmed, so they have **not** been settled. "
+                        f"Use **Sync** to reconcile against Polymarket, or settle them manually below."
+                    )
+                    for bp in blocked:
+                        st.caption(f"• **{str(bp.get('question',''))[:60]}** — {bp.get('settlement_blocked')}")
             with st.expander("🔍 1-Click Verification, Exit & Settlement"):
                 for tid, p in list(positions.items()):
                     slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
@@ -1060,43 +1273,7 @@ with tab_overview:
 
                             exit_btn_label = "Sell on CLOB" if pos_mode == "LIVE" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"ov_btn_exit_{tid}", width="stretch"):
-                                if pos_mode == "LIVE":
-                                    live_inst = live_broker.get_live_broker()
-                                    if not live_inst:
-                                        st.error("Live broker not ready.")
-                                        st.stop()
-                                    try:
-                                        with st.spinner(f"Submitting sell order on CLOB for {pos_acc}..."):
-                                            live_inst.exit_position(pos_acc, token_id_str, size=shares_held, price=exit_p)
-                                        broker.exit_position(tid, exit_price=exit_p, note=f"Manual Live Exit via Dashboard @ ${exit_p:.4f}")
-                                        if p.get("trade_id"):
-                                            database.exit_orphaned_trade(p.get("trade_id"), exit_price=exit_p, note=f"Manual Live Exit @ ${exit_p:.4f}")
-                                        _cached_all_trades.clear()
-                                        st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
-                                        st.rerun()
-                                    except Exception as ex:
-                                        err_s = str(ex).lower()
-                                        if "balance is not enough" in err_s or "not enough balance" in err_s:
-                                            with st.spinner("Detected 0 on-chain balance. Checking Polymarket records to reconcile..."):
-                                                reconciled = live_inst.reconcile_positions(pos_acc)
-                                            if reconciled:
-                                                _cached_all_trades.clear()
-                                                st.success(f"Position was already exited on Polymarket! Reconciled: {reconciled[0].get('note')}")
-                                                st.rerun()
-                                            else:
-                                                if p.get("trade_id"):
-                                                    database.force_settle_orphaned_trade(p.get("trade_id"), won=False, note="Closed: 0 balance on Polymarket")
-                                                _cached_all_trades.clear()
-                                                st.warning("Position already closed on Polymarket. Settled in local database.")
-                                                st.rerun()
-                                        else:
-                                            st.error(f"Failed to exit on-chain: {ex}")
-                                else:
-                                    broker.exit_position(tid, exit_price=exit_p, note=f"Manual Paper Exit via Dashboard @ ${exit_p:.4f}")
-                                    if p.get("trade_id"):
-                                        database.exit_orphaned_trade(p.get("trade_id"), exit_price=exit_p, note=f"Manual Paper Exit @ ${exit_p:.4f}")
-                                    _cached_all_trades.clear()
-                                    st.success(f"Closed paper trade! PnL: ${est_pnl:+.2f}")
+                                if execute_exit(tid, p, exit_p):
                                     st.rerun()
                     with qc4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
@@ -1189,25 +1366,79 @@ with tab_overview:
                         setattr(obj, k, v)
 
                     if is_live:
+                        # The kill switch is meant to block ALL new entries. The manual
+                        # trigger used to ignore it entirely, so the PANIC button stopped
+                        # the bot but left this button live.
+                        if kill_switch_active:
+                            st.error("Entry Kill Switch is ACTIVE -- new entries are blocked. Disable it in Control and Risk first.")
+                            st.stop()
+
                         live_inst = live_broker.get_live_broker()
                         if live_inst:
+                            # Check each account's own risk budget BEFORE sending money to
+                            # the exchange. This used to place first and check second, so a
+                            # limit breach left a real order on-chain with no local record.
+                            eligible = {}
+                            for acc_name in live_inst.get_account_names():
+                                acc_settings = settings_manager.get_account_settings(acc_name)
+                                if acc_settings.get("bot_status", "RUNNING") == "PAUSED":
+                                    st.warning(f"Skipping `{acc_name}`: account is paused.")
+                                    continue
+                                if acc_settings.get("entry_kill_switch", False):
+                                    st.warning(f"Skipping `{acc_name}`: account kill switch is active.")
+                                    continue
+                                ok_acc, why_acc = broker.can_open(
+                                    manual_stake,
+                                    account_name=acc_name,
+                                    limits={
+                                        "max_open_positions": acc_settings.get("max_open_positions"),
+                                        "max_total_exposure": acc_settings.get("max_total_exposure"),
+                                        "max_trades_per_day": acc_settings.get("max_trades_per_day"),
+                                    },
+                                )
+                                if not ok_acc:
+                                    st.warning(f"Skipping `{acc_name}`: {why_acc}")
+                                    continue
+                                eligible[acc_name] = float(manual_stake)
+
+                            if not eligible:
+                                st.error("No account can take this trade right now.")
+                                st.stop()
+
                             try:
-                                results = live_inst.place_buy_all(obj.token_id, obj.confirmed_price, override_stake=manual_stake)
-                                any_success = False
+                                results = live_inst.place_buy_selected(obj.token_id, obj.confirmed_price, eligible)
+                                any_change = False
                                 for res in results:
                                     if res["success"]:
-                                        any_success = True
+                                        any_change = True
+                                        # force=True: the shares are already ours, so record
+                                        # them even if a cap moved underneath us. Untracked
+                                        # live exposure is the worse failure.
                                         broker.open_position(
                                             obj,
                                             stake=res["stake"],
                                             mode="LIVE",
                                             account_name=res["account_name"],
                                             wallet_address=res["wallet"],
+                                            filled_size=res["filled_size"],
+                                            fill_price=res["avg_price"],
+                                            order_id=res.get("order_id"),
+                                            force=True,
                                         )
-                                        st.success(f"Live order placed for `{res['account_name']}` ({obj.question[:35]})!")
+                                        st.success(
+                                            f"`{res['account_name']}`: filled {res['filled_size']:.2f} shares "
+                                            f"@ ${res['avg_price']:.4f} (${res['filled_cost']:.2f})."
+                                        )
+                                    elif res["resting"]:
+                                        broker.record_unfilled()
+                                        st.warning(
+                                            f"`{res['account_name']}`: order accepted but resting unfilled "
+                                            f"(order {res.get('order_id')}). No position was opened -- cancel it "
+                                            f"from Control and Risk if you no longer want the entry."
+                                        )
                                     else:
-                                        st.error(f"Order failed for `{res['account_name']}`: {res['error']}")
-                                if any_success:
+                                        st.error(f"`{res['account_name']}`: {res['error']}")
+                                if any_change:
                                     _cached_all_trades.clear()
                                     st.rerun()
                                 else:
@@ -1538,7 +1769,7 @@ ACCOUNT_1_STAKE=25.0
                 if not all_orders:
                     st.info("No open CLOB limit orders across any account.")
                 else:
-                    st.dataframe(pd.DataFrame(all_orders), hide_index=True)
+                    render_open_orders(all_orders, account_name=None, key_prefix="ctrl_all")
 
                 st.markdown("##### On-Chain Positions (All Accounts)")
                 if not all_pos:
@@ -1571,7 +1802,7 @@ ACCOUNT_1_STAKE=25.0
                     if not live_orders:
                         st.info(f"No open CLOB limit orders for {vitals['name']}.")
                     else:
-                        st.dataframe(pd.DataFrame(live_orders), hide_index=True)
+                        render_open_orders(live_orders, account_name=sel_acc, key_prefix=f"ctrl_{sel_acc}")
 
                     st.markdown(f"##### On-Chain Positions — `{vitals['name']}`")
                     live_pos = _cached_live_positions(sel_acc)
@@ -1604,10 +1835,20 @@ with tab_history:
     default_perf = perf_options[0] if is_live else perf_options[1]
     perf_portfolio_view = st.segmented_control("Select Portfolio View", perf_options, default=default_perf, key="hist_perf_view") or default_perf
 
+    # Initialised up front: when the Live portfolio view is selected but the broker
+    # can't be built (missing/invalid credentials), the branch below only emitted a
+    # warning and never assigned these -- so the rest of the screen crashed with
+    # NameError: active_trades_for_table.
+    active_trades_for_table = []
+    active_pos_for_expander = None
+    active_orders_for_expander = None
+
     if perf_portfolio_view == "Live Execution Portfolio (On-Chain)":
         live_inst = live_broker.get_live_broker()
         if not live_inst:
             st.warning("Live trading credentials are not configured or invalid in `.env`. Check credentials in the **Control and Risk** screen.")
+            # Fall back to the locally recorded live trades so history stays readable.
+            active_trades_for_table = _cached_all_trades(broker_filter="live")
         else:
             live_acc_choices = ["All Accounts (Combined)"] + live_inst.get_account_names()
             selected_perf_acc = st.segmented_control("Portfolio Account Filter", live_acc_choices, default="All Accounts (Combined)", key="hist_perf_acc") or "All Accounts (Combined)"
@@ -1621,15 +1862,16 @@ with tab_history:
 
             live_exposure = sum(float(p.get("current_value", 0.0)) for p in live_pos)
             live_trades = _cached_all_trades(broker_filter="live", account_filter=target_acc)
-            closed_live = [t for t in live_trades if "PENDING" not in str(t.get("result", "")).upper()]
-            wins_live = len([t for t in closed_live if float(t.get("pnl", 0.0)) > 0])
+            closed_live = [t for t in live_trades if is_settled_trade(t)]
+            wins_live = len([t for t in closed_live if database.classify_result(float(t.get("pnl", 0.0) or 0)) == "WON"])
+            losses_live = len([t for t in closed_live if database.classify_result(float(t.get("pnl", 0.0) or 0)) == "LOST"])
             realized_live = sum(float(t.get("pnl", 0.0)) for t in closed_live)
             win_rate_live = (wins_live / len(closed_live) * 100) if closed_live else 0.0
             avg_pnl_live = (realized_live / len(closed_live)) if closed_live else 0.0
 
             with st.container(horizontal=True):
                 st.metric("Total Trades", len(live_trades), border=True)
-                st.metric("Win Rate", f"{win_rate_live:.1f}%", f"{len(closed_live)} settled", border=True)
+                st.metric("Win Rate", f"{win_rate_live:.1f}%", f"{wins_live}W / {losses_live}L, {len(closed_live)} settled", border=True)
                 st.metric("Realized PnL", f"${realized_live:+,.2f}", border=True)
                 st.metric("Avg PnL / Trade", f"${avg_pnl_live:+,.2f}", border=True)
 
@@ -1645,8 +1887,8 @@ with tab_history:
         # Scoped to broker='paper' -- previously this fetched every trade unfiltered,
         # so the "Paper Simulation Portfolio" KPIs silently included LIVE trades too.
         trades_list = _cached_all_trades(broker_filter="paper")
-        closed = [t for t in trades_list if "PENDING" not in str(t.get("result", "")).upper()]
-        wins = len([t for t in closed if float(t.get("pnl", 0.0)) > 0])
+        closed = [t for t in trades_list if is_settled_trade(t)]
+        wins = len([t for t in closed if database.classify_result(float(t.get("pnl", 0.0) or 0)) == "WON"])
         realized = sum(float(t.get("pnl", 0.0)) for t in closed)
         win_rate = (wins / len(closed) * 100) if closed else 0.0
         avg_pnl = (realized / len(closed)) if closed else 0.0
@@ -1752,41 +1994,17 @@ with tab_history:
 
                             exit_btn_label = "Sell on CLOB" if ot_broker == "live" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"h_btn_exit_{ot_key}", width="stretch"):
-                                if ot_broker == "live":
-                                    live_inst = live_broker.get_live_broker()
-                                    if not live_inst:
-                                        st.error("Live broker not ready.")
-                                        st.stop()
-                                    try:
-                                        with st.spinner(f"Submitting sell order on CLOB for {ot_acc}..."):
-                                            live_inst.exit_position(ot_acc, ot_tok_str, size=ot_tokens, price=exit_p)
-                                        broker.exit_position(ot_tok, exit_price=exit_p, note=f"Manual Live Exit via History @ ${exit_p:.4f}")
-                                        database.exit_orphaned_trade(ot.get("trade_id"), exit_price=exit_p, note=f"Manual Live Exit @ ${exit_p:.4f}")
-                                        _cached_all_trades.clear()
-                                        st.success(f"Sold on CLOB and settled position! PnL: ${est_pnl:+.2f}")
-                                        st.rerun()
-                                    except Exception as ex:
-                                        err_s = str(ex).lower()
-                                        if "balance is not enough" in err_s or "not enough balance" in err_s:
-                                            with st.spinner("Detected 0 on-chain balance. Checking Polymarket records to reconcile..."):
-                                                reconciled = live_inst.reconcile_positions(ot_acc)
-                                            if reconciled:
-                                                _cached_all_trades.clear()
-                                                st.success(f"Position was already exited on Polymarket! Reconciled: {reconciled[0].get('note')}")
-                                                st.rerun()
-                                            else:
-                                                if ot.get("trade_id"):
-                                                    database.force_settle_orphaned_trade(ot.get("trade_id"), won=False, note="Closed: 0 balance on Polymarket")
-                                                _cached_all_trades.clear()
-                                                st.warning("Position already closed on Polymarket. Settled in local database.")
-                                                st.rerun()
-                                        else:
-                                            st.error(f"Failed to exit on-chain: {ex}")
-                                else:
-                                    broker.exit_position(ot_tok, exit_price=exit_p, note=f"Manual Paper Exit via History @ ${exit_p:.4f}")
-                                    database.exit_orphaned_trade(ot.get("trade_id"), exit_price=exit_p, note=f"Manual Paper Exit @ ${exit_p:.4f}")
-                                    _cached_all_trades.clear()
-                                    st.success(f"Closed trade! PnL: ${est_pnl:+.2f}")
+                                # trades.db rows use different key names than state.json
+                                # positions; normalise before handing to the shared handler.
+                                hist_position = {
+                                    "mode": ot_broker.upper(),
+                                    "trade_id": ot.get("trade_id"),
+                                    "token_id": ot_tok,
+                                    "account_name": ot_acc,
+                                    "shares": ot_tokens,
+                                    "stake": float(ot.get("cost", 0.0) or 0.0),
+                                }
+                                if execute_exit(ot_tok, hist_position, exit_p):
                                     st.rerun()
                     with o_c4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
@@ -1814,6 +2032,10 @@ with tab_history:
                 res_tag = "✅ WON"
             elif "LOST" in res:
                 res_tag = "❌ LOST"
+            elif res == "VOID":
+                res_tag = "🚫 VOID"
+            elif res == "EVEN":
+                res_tag = "➖ EVEN"
             else:
                 res_tag = "⏳ PENDING"
             if history_filter != "ALL" and history_filter not in res:
@@ -1952,18 +2174,14 @@ with tab_history:
     with st.expander("🧹 Paper Portfolio Maintenance"):
         col_r1, col_r2 = st.columns(2)
         with col_r1:
-            if st.button("Reset State / Paper Portfolio", icon=":material/delete_forever:", help="Resets paper balance to $1,000 and clears paper positions (does NOT affect your live wallet)", width="stretch"):
-                broker.state = {
-                    "balance": config.STARTING_BALANCE,
-                    "positions": {},
-                    "closed_trades": [],
-                    "signals": [],
-                    "daily_trades": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0},
-                    "order_lifecycle": {"intentions": 0, "pending": 0, "filled": 0, "rejected": 0},
-                    "logs": [{"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO", "message": "Portfolio reset by user."}],
-                }
-                broker.save()
-                st.success("Paper portfolio reset successfully!")
+            live_tracked = len([p for p in state.get("positions", {}).values() if str(p.get("mode", "PAPER")).upper() == "LIVE"])
+            reset_help = "Resets the paper balance and clears PAPER positions only. LIVE positions stay tracked."
+            if live_tracked:
+                st.caption(f"⚠️ {live_tracked} LIVE position(s) are tracked and will be **kept** — this only clears paper.")
+            if st.button("Reset Paper Portfolio", icon=":material/delete_forever:", help=reset_help, width="stretch"):
+                kept = broker.reset_paper_portfolio()
+                _cached_all_trades.clear()
+                st.success(f"Paper portfolio reset. {kept} live position(s) kept.")
                 st.rerun()
         with col_r2:
             if st.button("Reset Settings to Defaults", icon=":material/restart_alt:", width="stretch"):
@@ -1983,9 +2201,9 @@ with tab_collab:
     )
 
     collab_trades = _cached_all_trades()
-    closed_collab = [t for t in collab_trades if "PENDING" not in str(t.get("result", "")).upper()]
-    wins_collab = len([t for t in closed_collab if float(t.get("pnl", 0.0)) > 0])
-    losses_collab = len(closed_collab) - wins_collab
+    closed_collab = [t for t in collab_trades if is_settled_trade(t)]
+    wins_collab = len([t for t in closed_collab if database.classify_result(float(t.get("pnl", 0.0) or 0)) == "WON"])
+    losses_collab = len([t for t in closed_collab if database.classify_result(float(t.get("pnl", 0.0) or 0)) == "LOST"])
     realized_collab = sum(float(t.get("pnl", 0.0)) for t in closed_collab)
     win_rate_collab = (wins_collab / len(closed_collab) * 100) if closed_collab else 0.0
 
@@ -2001,9 +2219,18 @@ with tab_collab:
         st.info("No trades recorded yet.")
     else:
         condensed_rows = []
-        for t in collab_trades[-30:]:
+        for t in collab_trades[:30]:
             res = str(t.get("result", "PENDING")).upper()
-            res_tag = "✅ WON" if "WON" in res else ("❌ LOST" if "LOST" in res else "⏳ PENDING")
+            if "WON" in res:
+                res_tag = "✅ WON"
+            elif "LOST" in res:
+                res_tag = "❌ LOST"
+            elif res == "VOID":
+                res_tag = "🚫 VOID"
+            elif res == "EVEN":
+                res_tag = "➖ EVEN"
+            else:
+                res_tag = "⏳ PENDING"
             pnl_val = float(t.get("pnl") or 0.0)
             pnl_disp = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
             condensed_rows.append({

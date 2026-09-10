@@ -48,16 +48,42 @@ def _within_resolution_window(end_dt: Optional[datetime], min_hours: float, max_
 HEALTH_MAX_SPREAD = 0.03
 HEALTH_MAX_QUOTE_AGE_SECONDS = 120
 
+# "Require High Confidence": a stricter version of the same idea. This setting was
+# writable from the dashboard but read by nothing, so turning it on changed no
+# behaviour at all. It now demands a tight two-sided market AND enough resting size
+# at the best ask to actually fill the intended stake -- the depth check also stops
+# the scanner surfacing prices no order could be filled at.
+CONFIDENCE_MAX_SPREAD = 0.01
+CONFIDENCE_MAX_QUOTE_AGE_SECONDS = 60
+CONFIDENCE_DEPTH_MULTIPLE = 1.0
 
-def _orderbook_health_price(order_book: Any) -> Optional[float]:
+# Set by find_opportunities when a scan fails, so callers can distinguish "the market
+# had nothing" from "the scan broke". Failures used to be print()ed and swallowed,
+# which the dashboard rendered indistinguishably from a clean empty scan.
+LAST_SCAN_ERROR: Optional[str] = None
+
+
+def _orderbook_health_price(
+    order_book: Any,
+    require_high_confidence: bool = False,
+    required_shares: float = 0.0,
+) -> Optional[float]:
     """Returns the live best-ask price if this token's CLOB order book looks
-    healthy (two-sided, tight spread, fresh quote); otherwise None."""
+    healthy (two-sided, tight spread, fresh quote); otherwise None.
+
+    With require_high_confidence the spread and staleness limits tighten and the best
+    ask must also hold at least `required_shares` of resting size.
+    """
     if not order_book.bids or not order_book.asks:
         return None
 
+    max_spread = CONFIDENCE_MAX_SPREAD if require_high_confidence else HEALTH_MAX_SPREAD
+    max_age = CONFIDENCE_MAX_QUOTE_AGE_SECONDS if require_high_confidence else HEALTH_MAX_QUOTE_AGE_SECONDS
+
+    # SDK documents bids ascending (best last) and asks descending (best last).
     best_bid = float(order_book.bids[-1].price)
     best_ask = float(order_book.asks[-1].price)
-    if (best_ask - best_bid) > HEALTH_MAX_SPREAD:
+    if (best_ask - best_bid) > max_spread:
         return None
 
     if order_book.timestamp is not None:
@@ -65,8 +91,19 @@ def _orderbook_health_price(order_book: Any) -> Optional[float]:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
-        if age_seconds > HEALTH_MAX_QUOTE_AGE_SECONDS:
+        if age_seconds > max_age:
             return None
+
+    if require_high_confidence and required_shares > 0:
+        ask_size = float(order_book.asks[-1].size or 0.0)
+        if ask_size < required_shares * CONFIDENCE_DEPTH_MULTIPLE:
+            return None
+
+    min_size = float(getattr(order_book, "min_order_size", 0.0) or 0.0)
+    if min_size > 0 and required_shares > 0 and required_shares < min_size:
+        # The intended stake is below this market's minimum order size, so any order
+        # would be rejected. Don't surface it as a tradable signal.
+        return None
 
     return best_ask
 
@@ -110,6 +147,8 @@ def find_opportunities(
     re-confirmed against the live CLOB order book and sorted by highest confirmed price.
     Pass settings_override (e.g. a union of several accounts' thresholds) to scan a
     broader net than the global settings in one pass."""
+    global LAST_SCAN_ERROR
+    LAST_SCAN_ERROR = None
     held_token_ids = held_token_ids or set()
     opportunities = []
     client = polymarket_client.get_public_client()
@@ -127,6 +166,10 @@ def find_opportunities(
     sports_types = settings.get("sports_market_types", ["moneyline"])
     sports_tag = settings.get("sports_tag_id", 100639)
     require_healthy_data = bool(settings.get("require_healthy_data", True))
+    require_high_confidence = bool(settings.get("require_high_confidence", False))
+    # Depth/minimum-size checks need to know how big an order this signal would
+    # produce, so price the intended stake into shares before probing the book.
+    reference_stake = float(settings.get("stake_per_trade", 25.0) or 0.0)
 
     late_game_enabled = bool(settings.get("late_game_enabled", False))
     require_authoritative_time = bool(settings.get("require_authoritative_time", False))
@@ -198,12 +241,17 @@ def find_opportunities(
                     # Re-confirm against the live CLOB book. With "Require Healthy
                     # Data" on, pull the actual order book so we can also verify
                     # it's a live, tight, two-sided quote -- not just one stale print.
-                    if require_healthy_data:
+                    if require_healthy_data or require_high_confidence:
                         try:
                             order_book = client.get_order_book(token_id=token_id_str)
                         except (RateLimitError, PolymarketError):
                             continue
-                        confirmed_price = _orderbook_health_price(order_book)
+                        required_shares = (reference_stake / gamma_price) if gamma_price > 0 else 0.0
+                        confirmed_price = _orderbook_health_price(
+                            order_book,
+                            require_high_confidence=require_high_confidence,
+                            required_shares=required_shares,
+                        )
                         if confirmed_price is None:
                             continue
                     else:
@@ -242,6 +290,9 @@ def find_opportunities(
                 break
 
     except Exception as exc:
+        # Record the failure as well as printing it. A swallowed error used to be
+        # indistinguishable, in the dashboard, from a scan that simply found nothing.
+        LAST_SCAN_ERROR = f"{type(exc).__name__}: {exc}"
         print(f"[scanner] Error scanning sports markets: {exc}")
 
     opportunities.sort(key=lambda o: o.confirmed_price, reverse=True)

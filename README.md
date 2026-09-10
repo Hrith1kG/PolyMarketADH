@@ -23,8 +23,10 @@ to backtest/paper-trade your own risk tolerance, not a money machine.
   - **Live Control**: Seamless zero-restart Paper $\leftrightarrow$ Live execution switching, Entry Kill Switch, and real-time live account vitals (wallet, type, on-chain USDC.e collateral balance, open CLOB orders).
   - **Market Signals & Manual Trigger**: Real-time sports moneyline opportunities feed with 1-click manual execution.
   - **Trade History & Performance**: Settled trades log, win-rate tracking, realized P&L, and safety portfolio reset controls.
-- **Risk Management**: Enforces max trades per day, max open positions, max exposure, slippage limits, and emergency kill-switches.
-- **CLOB Verification**: Re-confirms Gamma-reported prices against the live CLOB order book before entering trades.
+- **Risk Management**: Enforces max trades per day, max open positions, max exposure, entry slippage limits, and emergency kill-switches (the kill switch blocks manual entries too).
+- **CLOB Verification**: Re-confirms Gamma-reported prices against the live CLOB order book before entering trades, and re-checks the best ask against the slippage cap immediately before firing.
+- **Fill Verification**: A position is only recorded once the exchange reports shares actually filled, sized from the realized fill. Orders that are rejected, or accepted but left resting in the book, are surfaced as working orders (cancellable from **Control and Risk**) rather than tracked as positions.
+- **Honest Settlement**: Trades settle only against a confirmed outcome price for the specific outcome token held. Positions whose outcome cannot be established are left `PENDING` and flagged for review; locally recorded trades that never executed on-chain are marked `VOID` and excluded from P&L and win rate.
 
 ---
 
@@ -76,3 +78,4 @@ The bot executes automated scan and settlement loops, applying the threshold set
 - `polymarket_client.py` -- unified `PublicClient` and `SecureClient` provider
 - `config.py` -- baseline configurations loaded from `.env`
 - `main.py` -- the automated scan/trade/settle loop
+- `tests/` -- regression suite for execution correctness (`./tests/run_all.sh`)
