@@ -658,7 +658,7 @@ def is_settled_trade(trade) -> bool:
     return "PENDING" not in result and result != "VOID"
 
 
-def execute_exit(position_key, position, exit_price, key_prefix=""):
+def execute_exit(position_key, position, exit_price, order_type="LIMIT", key_prefix=""):
     """Exits one position. Returns True when the caller should st.rerun()."""
     mode = str(position.get("mode", execution_mode_str)).upper()
     trade_id = position.get("trade_id")
@@ -697,7 +697,7 @@ def execute_exit(position_key, position, exit_price, key_prefix=""):
 
     try:
         with st.spinner(f"Submitting sell order on CLOB for {account_name}..."):
-            outcome = live_inst.exit_position(account_name, token_id, size=shares_held, price=exit_price)
+            outcome = live_inst.exit_position(account_name, token_id, size=shares_held, price=exit_price, order_type=order_type)
     except Exception as ex:
         if live_broker.is_no_balance_rejection(None, str(ex)):
             return _reconcile_after_failed_exit(live_inst, account_name, trade_id, token_id, _clear_phantom)
@@ -1271,9 +1271,16 @@ with tab_overview:
                             pnl_color = "green" if est_pnl >= 0 else "red"
                             st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
 
+                            exit_order_type = st.selectbox(
+                                "Exit Order Type",
+                                options=["LIMIT", "MARKET"],
+                                index=0,
+                                key=f"ov_exit_type_{tid}"
+                            )
+
                             exit_btn_label = "Sell on CLOB" if pos_mode == "LIVE" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"ov_btn_exit_{tid}", width="stretch"):
-                                if execute_exit(tid, p, exit_p):
+                                if execute_exit(tid, p, exit_p, order_type=exit_order_type):
                                     st.rerun()
                     with qc4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
@@ -1341,7 +1348,7 @@ with tab_overview:
             sel_url = database.get_polymarket_url(sel_slug, selected_sig.get("market_id"))
             st.link_button(f"Inspect '{selected_sig.get('question')[:45]}...' on Polymarket", sel_url, icon=":material/open_in_new:")
 
-            col_stake, col_btn = st.columns([2, 1])
+            col_stake, col_type, col_btn = st.columns([1.5, 1.5, 1.5])
             with col_stake:
                 manual_stake = st.number_input(
                     "Trade Stake ($)",
@@ -1350,6 +1357,14 @@ with tab_overview:
                     value=float(max(1.0, min(500.0, float(settings.get("stake_per_trade", 25.0) or 25.0)))),
                     step=5.0,
                     key="overview_manual_stake_input",
+                )
+            with col_type:
+                order_type = st.selectbox(
+                    "Order Type",
+                    options=["LIMIT", "MARKET"],
+                    index=0,
+                    help="LIMIT waits for your exact price (can be partially filled or rest in the book). MARKET executes immediately at the best available price (bypasses size minimums but risks slippage).",
+                    key="overview_manual_order_type",
                 )
             with col_btn:
                 st.write("")
@@ -1406,7 +1421,7 @@ with tab_overview:
                                 st.stop()
 
                             try:
-                                results = live_inst.place_buy_selected(obj.token_id, obj.confirmed_price, eligible)
+                                results = live_inst.place_buy_selected(obj.token_id, obj.confirmed_price, eligible, order_type=order_type)
                                 any_change = False
                                 for res in results:
                                     if res["success"]:
@@ -1992,6 +2007,13 @@ with tab_history:
                             pnl_color = "green" if est_pnl >= 0 else "red"
                             st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
 
+                            exit_order_type = st.selectbox(
+                                "Exit Order Type",
+                                options=["LIMIT", "MARKET"],
+                                index=0,
+                                key=f"h_exit_type_{ot_key}"
+                            )
+
                             exit_btn_label = "Sell on CLOB" if ot_broker == "live" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"h_btn_exit_{ot_key}", width="stretch"):
                                 # trades.db rows use different key names than state.json
@@ -2004,7 +2026,7 @@ with tab_history:
                                     "shares": ot_tokens,
                                     "stake": float(ot.get("cost", 0.0) or 0.0),
                                 }
-                                if execute_exit(ot_tok, hist_position, exit_p):
+                                if execute_exit(ot_tok, hist_position, exit_p, order_type=exit_order_type):
                                     st.rerun()
                     with o_c4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
