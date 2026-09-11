@@ -99,12 +99,10 @@ def _orderbook_health_price(
         if ask_size < required_shares * CONFIDENCE_DEPTH_MULTIPLE:
             return None
 
-    min_size = float(getattr(order_book, "min_order_size", 0.0) or 0.0)
-    if min_size > 0 and required_shares > 0 and required_shares < min_size:
-        # The intended stake is below this market's minimum order size, so any order
-        # would be rejected. Don't surface it as a tradable signal.
-        return None
-
+    # The book's `min_order_size` is intentionally not used to filter signals out.
+    # Gating on it silently hid every signal whenever stake_per_trade was small, and
+    # it does not actually predict rejection: orders well below the reported
+    # min_order_size fill on this exchange in practice.
     return best_ask
 
 

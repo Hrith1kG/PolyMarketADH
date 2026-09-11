@@ -36,6 +36,14 @@ class LiveBrokerError(Exception):
 FILLED_STATUS = "matched"
 RESTING_STATUSES = ("live", "delayed")
 
+# Selling a position rarely clears the wallet to exactly zero. Order sizes are
+# quantised to 2dp, so a sell floored to 1.05 against a holding of 1.06 leaves
+# 0.01 shares behind -- roughly one cent of value, but still a non-zero balance.
+# Reconciliation used to treat ANY balance > 0 as "still holding this position",
+# so that one cent of dust pinned the trade as PENDING permanently and the
+# dashboard kept listing a position that had already been sold.
+DUST_SHARE_THRESHOLD = 0.05
+
 
 def is_no_balance_rejection(code: Optional[str], message: str) -> bool:
     """True when a rejection means "the wallet doesn't hold this".
@@ -285,18 +293,15 @@ class AccountSession:
         if size * float(price) < 1.0:
             size = math.ceil((1.00 / float(price)) * 100.0) / 100.0
 
-        # Respect the market's own minimum order size instead of discovering it as a
-        # rejection: below-minimum orders are refused by the CLOB, and a refusal used
-        # to be booked as a filled position.
-        constraints = self.get_market_order_constraints(token_id)
-        min_size = float(constraints.get("min_order_size") or 0.0)
-        if min_size > 0 and size < min_size:
-            raise LiveBrokerError(
-                f"[{self.name}] Stake ${float(stake):.2f} at ${float(price):.4f} is {size:.2f} shares, "
-                f"below this market's {min_size:.2f}-share minimum "
-                f"(needs at least ${min_size * float(price):.2f})."
-            )
-
+        # NOTE: the order book's `min_order_size` is deliberately NOT enforced here.
+        # An earlier version of this code rejected orders below it client-side, which
+        # blocked orders the exchange demonstrably accepts: wallet history shows
+        # filled buys of ~1.06 shares on markets reporting a larger min_order_size,
+        # and Polymarket's own UI opens positions of ~1.5 shares. The SDK never
+        # validates against the field either -- it only exposes it as book metadata.
+        # Its exact semantics are not documented well enough to gate real orders on,
+        # so the exchange decides, and interpret_order_response() below makes sure a
+        # rejection is recorded as a rejection rather than as a filled position.
         try:
             response = self.client.place_limit_order(
                 token_id=token_id,
@@ -310,7 +315,36 @@ class AccountSession:
         outcome = interpret_order_response(response, side="BUY", requested_size=size, requested_price=float(price))
         outcome["requested_size"] = size
         outcome["requested_stake"] = float(stake)
+
+        # If the exchange did refuse it, attach the book's own constraints to the
+        # message so the reason is actionable instead of a bare error code.
+        if not outcome["filled"] and not outcome["resting"]:
+            constraints = self.get_market_order_constraints(token_id)
+            min_size = float(constraints.get("min_order_size") or 0.0)
+            tick = float(constraints.get("tick_size") or 0.0)
+            detail = []
+            if min_size:
+                detail.append(f"market min_order_size={min_size:g} shares (${min_size * float(price):.2f} at this price)")
+            if tick:
+                detail.append(f"tick_size={tick:g}")
+            if detail:
+                outcome["message"] = f"{outcome.get('message', '')} [order was {size:.2f} shares; {'; '.join(detail)}]".strip()
         return outcome
+
+    def get_position_size(self, token_id: str) -> Optional[float]:
+        """Returns the shares of `token_id` actually held on-chain, or None if the
+        lookup fails. Exits should sell this rather than the locally recorded size:
+        the two drifted apart because buys were rounded up to 2dp while the local
+        record stored the unrounded stake/price, so every exit under-sold and left
+        dust behind."""
+        try:
+            for p in self.get_live_positions():
+                if str(p.get("token_id")) == str(token_id):
+                    return float(p.get("size", 0.0) or 0.0)
+            return 0.0
+        except Exception as exc:
+            print(f"[live_broker][{self.name}] Could not read on-chain size for {token_id}: {exc}")
+            return None
 
     def place_sell(self, token_id: str, price: float, size: float) -> Dict[str, Any]:
         """Places a limit sell for `size` shares at `price` to exit an open position,
@@ -533,6 +567,13 @@ class LiveBroker:
         session = self.sessions.get(account_name) or self.primary_session
         if not session:
             raise LiveBrokerError(f"No active session found for account '{account_name}'")
+
+        # Sell what the wallet actually holds, not what the local book thinks it
+        # holds. Selling the local number under-sold by a fraction of a share on
+        # every exit, and the leftover dust then read as an open position forever.
+        on_chain = session.get_position_size(token_id)
+        if on_chain is not None and on_chain > DUST_SHARE_THRESHOLD:
+            size = on_chain
         return session.place_sell(token_id=token_id, price=price, size=size)
 
     def cancel_order(self, order_id: str, account_name: Optional[str] = None) -> Any:
@@ -667,7 +708,10 @@ class LiveBroker:
             try:
                 # 1. Query live open positions on-chain for this wallet
                 on_chain_pos = session.get_live_positions()
-                held_token_ids = {str(p.get("token_id")) for p in on_chain_pos if float(p.get("size", 0.0)) > 0.0}
+                held_token_ids = {
+                    str(p.get("token_id")) for p in on_chain_pos
+                    if float(p.get("size", 0.0)) > DUST_SHARE_THRESHOLD
+                }
 
                 # 2. Query recent trades on-chain, keeping both sides: the SELL gives
                 #    the exit price, and the *absence* of a BUY tells us the entry

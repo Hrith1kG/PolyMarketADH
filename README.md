@@ -25,7 +25,7 @@ to backtest/paper-trade your own risk tolerance, not a money machine.
   - **Trade History & Performance**: Settled trades log, win-rate tracking, realized P&L, and safety portfolio reset controls.
 - **Risk Management**: Enforces max trades per day, max open positions, max exposure, entry slippage limits, and emergency kill-switches (the kill switch blocks manual entries too).
 - **CLOB Verification**: Re-confirms Gamma-reported prices against the live CLOB order book before entering trades, and re-checks the best ask against the slippage cap immediately before firing.
-- **Fill Verification**: A position is only recorded once the exchange reports shares actually filled, sized from the realized fill. Orders that are rejected, or accepted but left resting in the book, are surfaced as working orders (cancellable from **Control and Risk**) rather than tracked as positions.
+- **Fill Verification**: A position is only recorded once the exchange reports shares actually filled, sized from the realized fill. Exits sell the balance the wallet actually holds, so they don't leave fractional dust behind. Orders that are rejected, or accepted but left resting in the book, are surfaced as working orders (cancellable from **Control and Risk**) rather than tracked as positions.
 - **Honest Settlement**: Trades settle only against a confirmed outcome price for the specific outcome token held. Positions whose outcome cannot be established are left `PENDING` and flagged for review; locally recorded trades that never executed on-chain are marked `VOID` and excluded from P&L and win rate.
 
 ---

@@ -3,6 +3,33 @@
 Audit of `main.py`, `scanner.py`, `paper_broker.py`, `live_broker.py`, `database.py`,
 `settings_manager.py`, `config.py` and `dashboard.py` against `polymarket-client` 0.10.0.
 
+## Correction (2026-09-11)
+
+Wallet evidence refuted part of the original C1 analysis. On-chain history shows the
+account **did** fill buys of ~1.06 shares (~$1.00 each) and later sold ~1.05 of each,
+with transaction hashes; Polymarket's own UI likewise holds a 1.5-share, $1.00
+position. So:
+
+* **The 10 stuck positions were real, and had genuinely been sold.** They were not
+  phantom rows from rejected orders, as first written below. C1 (no fill
+  verification) is a real latent defect — the code genuinely never inspected the
+  order response — but it was **not** the cause of this incident.
+* **The actual cause was a fractional residue.** Buys were rounded *up* to 2dp
+  (`ceil` → 1.06 shares) while the local record stored the unrounded `stake / price`
+  (1.0571), and exits floored *that* number (→ 1.05). Every exit therefore under-sold
+  by ~0.01 shares. `reconcile_positions` counted any balance `> 0.0` as "still
+  holding", so ~1¢ of dust pinned each trade as PENDING permanently — and C2 meant
+  the `state.json` entry was never cleared either. Together: a position that had been
+  sold, kept rendering as open, reporting "already exited" on every retry.
+* **A `min_order_size` pre-flight check added during the first round of fixes was
+  wrong and has been removed.** It blocked orders the exchange demonstrably accepts.
+  The SDK never validates against that field either; it is book metadata whose
+  semantics are not documented well enough to gate real orders on. The exchange
+  decides, and fill verification ensures a rejection is recorded as a rejection.
+
+Fixes: `DUST_SHARE_THRESHOLD` in reconciliation, exits sized from the on-chain
+balance rather than the local record, and both `min_order_size` gates removed.
+
 ## Status
 
 Everything below has been fixed. Regression tests covering the behaviour live in
@@ -10,7 +37,8 @@ Everything below has been fixed. Regression tests covering the behaviour live in
 
 | ID | Finding | Status |
 |----|---------|--------|
-| C1 | Positions booked on submission, not fill | Fixed — `interpret_order_response` |
+| C1 | Positions booked on submission, not fill | Fixed — `interpret_order_response` (latent; not the cause of the reported incident — see Correction) |
+| C1b | Exits under-sold, leaving dust that pinned trades as PENDING | Fixed — `DUST_SHARE_THRESHOLD` + on-chain exit sizing |
 | C2 | Exit path never cleared `state.json` | Fixed — shared `execute_exit` |
 | C3 | Bot resurrected deleted positions | Fixed — state lock + `reload()` |
 | C4 | UMA-resolved markets booked as wins | Fixed |

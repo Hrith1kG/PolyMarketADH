@@ -74,3 +74,54 @@ assert s["closed_trades"] == 1 and s["wins"] == 1, s
 assert s["win_rate"] == 100.0, s
 print(f"PASS win rate computed over 1 real trade, not 2 (void excluded)")
 print("\nall reconcile tests passed")
+
+# --- Dust regression: a sold position leaving a fractional residue -------------
+# Reproduces the wallet history: bought 1.06 shares, sold 1.05, 0.01 left behind.
+# Reconciliation treated any non-zero balance as "still held", so the trade stayed
+# PENDING forever and the dashboard kept listing a position that had been sold.
+import importlib
+os.environ["STATE_FILE"]="state_dust.json"; os.environ["TRADES_DB_FILE"]="trades_dust.db"
+for f in ("state_dust.json","trades_dust.db"):
+    if os.path.exists(f): os.remove(f)
+import config
+importlib.reload(config); importlib.reload(database); importlib.reload(paper_broker)
+
+bd = paper_broker.PaperBroker()
+p_dust, _ = bd.open_position(Opp("800000001", 0.9460), stake=1.0, mode="LIVE",
+                             account_name="Anubrata 2", filled_size=1.06, fill_price=0.9460)
+
+sess2 = types.SimpleNamespace()
+sess2.name = "Anubrata 2"; sess2.wallet = "0xwallet"
+# 0.01 shares of dust still sitting in the wallet after the exit
+sess2.get_live_positions = lambda: [{"token_id": "800000001", "size": 0.01}]
+sess2.client = types.SimpleNamespace(list_trades=lambda **kw: Pager([
+    Trade("800000001", "BUY", 0.9460, 1.06),
+    Trade("800000001", "SELL", 0.9900, 1.05),
+]))
+lb2 = live_broker.LiveBroker.__new__(live_broker.LiveBroker)
+lb2.account_list = [sess2]; lb2.sessions = {"Anubrata 2": sess2}
+lb2.get_session = lambda name=None: sess2
+
+out2 = lb2.reconcile_positions()
+assert len(out2) == 1, f"dust residue wedged the position as still-held: {out2}"
+r = out2[0]
+assert r["voided"] is False, r
+assert abs(r["exit_price"] - 0.99) < 1e-9, r
+assert paper_broker.PaperBroker()._find_position_key("800000001") is None, \
+    "position with dust residue still in state.json"
+print(f"PASS 0.01-share dust no longer wedges a sold position (settled @ ${r['exit_price']:.2f})")
+
+# A genuine partial exit must still count as open, not be swept up as dust
+sess2.get_live_positions = lambda: [{"token_id": "800000002", "size": 0.60}]
+bd2 = paper_broker.PaperBroker()
+bd2.open_position(Opp("800000002", 0.9460), stake=1.0, mode="LIVE",
+                  account_name="Anubrata 2", filled_size=1.06, fill_price=0.9460)
+sess2.client = types.SimpleNamespace(list_trades=lambda **kw: Pager([
+    Trade("800000002", "BUY", 0.9460, 1.06),
+    Trade("800000002", "SELL", 0.9900, 0.46),
+]))
+out3 = lb2.reconcile_positions()
+assert not any(r.get("trade_id") and "800000002" in str(r.get("question","")) for r in out3), out3
+assert paper_broker.PaperBroker()._find_position_key("800000002") is not None, \
+    "a real 0.60-share remainder was wrongly swept away as dust"
+print("PASS a genuine 0.60-share remainder is still treated as open")
