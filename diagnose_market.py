@@ -141,13 +141,22 @@ def diagnose(market, s):
             ok = scanner._late_game_ok(start_dt, end_dt,
                                        float(s.get("late_game_threshold_seconds", 600)),
                                        bool(s.get("require_authoritative_time", False)))
+            secs = ((end_dt.replace(tzinfo=timezone.utc) if end_dt.tzinfo is None else end_dt)
+                    - datetime.now(timezone.utc)).total_seconds() if end_dt else None
             check("late_game_ok", ok,
                   f"threshold={s.get('late_game_threshold_seconds')}s, "
                   f"require_authoritative_time={s.get('require_authoritative_time')}")
+            if secs is not None and secs > float(s.get("late_game_threshold_seconds", 600)):
+                print(f"{INFO} late_game compares end_date, not the match end: "
+                      f"{secs/3600:.1f}h remain vs a {float(s.get('late_game_threshold_seconds', 600))/60:.0f}min "
+                      f"threshold.\n       If end_date is a generic expiry rather than the "
+                      f"expected finish, this gate\n       can never pass for this market.")
 
     # ---- Category filters ----
     print("\n-- CATEGORY / TYPE --")
-    mtype = sp.sports_market_types if sp else None
+    # MarketSportsMetadata exposes sports_market_type (singular); the plural spelling
+    # is the *settings* key naming the list of accepted types.
+    mtype = sp.sports_market_type if sp else None
     print(f"{INFO} market.sports = {sp!r}")
     print(f"{INFO} sports_market_type on market = {mtype!r}")
     if s.get("only_sports", True):
