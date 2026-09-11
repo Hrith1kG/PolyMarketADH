@@ -2,6 +2,7 @@
 providing persistent execution logs, settlement history, and analytics."""
 import os
 import sqlite3
+import contextlib
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -71,10 +72,17 @@ def classify_result(pnl: float) -> str:
     return "EVEN"
 
 
-def get_connection(db_path: str = DB_FILE) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+@contextlib.contextmanager
+def get_connection(db_path: str = DB_FILE):
+    conn = sqlite3.connect(db_path, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 _INITIALISED_DBS: set = set()

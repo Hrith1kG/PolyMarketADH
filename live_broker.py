@@ -284,24 +284,49 @@ class AccountSession:
             print(f"[live_broker][{self.name}] Could not read book for {token_id}: {exc}")
         return info
 
-    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None) -> Dict[str, Any]:
-        """Places a limit buy sized to `stake_usd` at `price` and returns the interpreted
+    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None, order_type: str = "LIMIT") -> Dict[str, Any]:
+        """Places a buy order sized to `stake_usd` at `price` and returns the interpreted
         fill outcome (see interpret_order_response). Never reports a fill it didn't get."""
         stake = stake_usd if stake_usd is not None else settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE)
+        
+        if order_type.upper() == "MARKET":
+            try:
+                # Market order uses 'amount' as the USDC spend target
+                response = self.client.place_market_order(
+                    token_id=token_id,
+                    side="BUY",
+                    amount=float(stake),
+                )
+            except Exception as exc:
+                raise LiveBrokerError(f"[{self.name}] Failed to place market order: {exc}")
+            
+            # Since market orders don't strictly have a requested price/size in shares, 
+            # we estimate the size for reconciliation fallback if amounts are omitted.
+            est_size = math.ceil((float(stake) / float(price)) * 100.0) / 100.0 if float(price) > 0 else 0.0
+            outcome = interpret_order_response(response, side="BUY", requested_size=est_size, requested_price=float(price))
+            outcome["requested_size"] = est_size
+            outcome["requested_stake"] = float(stake)
+            return outcome
+
         # Ensure ceiling rounding and min notional >= 1.00 USD so Polymarket's min size check never fails
         size = math.ceil((float(stake) / float(price)) * 100.0) / 100.0
         if size * float(price) < 1.0:
             size = math.ceil((1.00 / float(price)) * 100.0) / 100.0
 
-        # NOTE: the order book's `min_order_size` is deliberately NOT enforced here.
-        # An earlier version of this code rejected orders below it client-side, which
-        # blocked orders the exchange demonstrably accepts: wallet history shows
-        # filled buys of ~1.06 shares on markets reporting a larger min_order_size,
-        # and Polymarket's own UI opens positions of ~1.5 shares. The SDK never
-        # validates against the field either -- it only exposes it as book metadata.
-        # Its exact semantics are not documented well enough to gate real orders on,
-        # so the exchange decides, and interpret_order_response() below makes sure a
-        # rejection is recorded as a rejection rather than as a filled position.
+        # The book's `min_order_size` is logged but deliberately NOT enforced. An
+        # earlier version raised on it, which blocked orders the exchange
+        # demonstrably accepts: wallet history shows filled buys of ~1.06 shares on
+        # markets reporting a larger min_order_size, and Polymarket's own UI opens
+        # positions of ~1.5 shares. The SDK never validates against the field either
+        # -- it is book metadata whose exact semantics aren't documented well enough
+        # to gate real orders on. The exchange decides, and interpret_order_response()
+        # below makes sure a refusal is recorded as a refusal, not as a filled position.
+        constraints = self.get_market_order_constraints(token_id)
+        min_size = float(constraints.get("min_order_size") or 0.0)
+        if min_size > 0 and size < min_size:
+            print(f"[live_broker][{self.name}] Note: stake ${float(stake):.2f} at ${float(price):.4f} is {size:.2f} shares, "
+                  f"below this market's reported min_order_size of {min_size:.2f}. Submitting anyway.")
+
         try:
             response = self.client.place_limit_order(
                 token_id=token_id,
@@ -346,21 +371,32 @@ class AccountSession:
             print(f"[live_broker][{self.name}] Could not read on-chain size for {token_id}: {exc}")
             return None
 
-    def place_sell(self, token_id: str, price: float, size: float) -> Dict[str, Any]:
-        """Places a limit sell for `size` shares at `price` to exit an open position,
+    def place_sell(self, token_id: str, price: float, size: float, order_type: str = "LIMIT") -> Dict[str, Any]:
+        """Places a sell order for `size` shares at `price` to exit an open position,
         returning the interpreted fill outcome rather than a bare response."""
         size_to_sell = math.floor(float(size) * 100.0) / 100.0
         if size_to_sell <= 0:
             raise LiveBrokerError(f"[{self.name}] Invalid sell size: {size}")
-        try:
-            response = self.client.place_limit_order(
-                token_id=token_id,
-                price=price,
-                size=size_to_sell,
-                side="SELL",
-            )
-        except Exception as exc:
-            raise LiveBrokerError(f"[{self.name}] Failed to place sell order: {exc}")
+        
+        if order_type.upper() == "MARKET":
+            try:
+                response = self.client.place_market_order(
+                    token_id=token_id,
+                    side="SELL",
+                    shares=size_to_sell,
+                )
+            except Exception as exc:
+                raise LiveBrokerError(f"[{self.name}] Failed to place market sell order: {exc}")
+        else:
+            try:
+                response = self.client.place_limit_order(
+                    token_id=token_id,
+                    price=price,
+                    size=size_to_sell,
+                    side="SELL",
+                )
+            except Exception as exc:
+                raise LiveBrokerError(f"[{self.name}] Failed to place sell order: {exc}")
 
         outcome = interpret_order_response(response, side="SELL", requested_size=size_to_sell, requested_price=float(price))
         outcome["requested_size"] = size_to_sell
@@ -559,7 +595,7 @@ class LiveBroker:
 
         return results
 
-    def exit_position(self, account_name: str, token_id: str, size: float, price: float) -> Dict[str, Any]:
+    def exit_position(self, account_name: str, token_id: str, size: float, price: float, order_type: str = "LIMIT") -> Dict[str, Any]:
         """Dispatches a sell order to exit an open position on Polymarket CLOB for the
         given account, returning the interpreted fill outcome. Callers must check
         outcome["filled"] before booking the exit locally -- a rejected or resting
@@ -574,7 +610,7 @@ class LiveBroker:
         on_chain = session.get_position_size(token_id)
         if on_chain is not None and on_chain > DUST_SHARE_THRESHOLD:
             size = on_chain
-        return session.place_sell(token_id=token_id, price=price, size=size)
+        return session.place_sell(token_id=token_id, price=price, size=size, order_type=order_type)
 
     def cancel_order(self, order_id: str, account_name: Optional[str] = None) -> Any:
         """Cancels a single resting order on one account (defaults to the primary)."""
@@ -594,7 +630,7 @@ class LiveBroker:
                 results.append({"account": sess.name, "success": False, "error": str(exc)})
         return results
 
-    def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float]) -> List[Dict[str, Any]]:
+    def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float], order_type: str = "LIMIT") -> List[Dict[str, Any]]:
         """Concurrently dispatches buy orders for only the given subset of accounts
         (name -> stake). Used so accounts can independently opt in/out of an opportunity
         (per their own pause/kill-switch/filters/limits) while still firing in parallel
@@ -607,7 +643,7 @@ class LiveBroker:
 
         def _execute_session(name: str, session: AccountSession, stake: float):
             try:
-                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake)
+                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake, order_type=order_type)
                 return _buy_result(session, stake, outcome=outcome)
             except Exception as exc:
                 return _buy_result(session, stake, error=str(exc))
@@ -757,27 +793,10 @@ class LiveBroker:
                         res = database.classify_result(pnl)
                         closed_ts = str(matching_sell.timestamp or datetime.now(timezone.utc).isoformat())
                         note = f"Exited directly on Polymarket @ ${sell_price:.4f}"
-                    elif tok not in bought_token_ids:
-                        # Never acquired on-chain: the order behind this row never
-                        # filled. Void it rather than inventing a win or a loss.
-                        void_note = "Voided: order never filled on Polymarket (no on-chain buy, no balance)"
-                        database.void_trade(pt.get("trade_id"), note=void_note)
-                        broker_inst.discard_position(pt.get("trade_id") or tok, note=void_note)
-                        reconciled.append({
-                            "trade_id": pt.get("trade_id"),
-                            "account": session.name,
-                            "question": pt.get("question"),
-                            "outcome": pt.get("outcome"),
-                            "exit_price": None,
-                            "pnl": 0.0,
-                            "voided": True,
-                            "note": void_note,
-                        })
-                        continue
                     else:
-                        # Bought at some point, no balance now, no SELL in recent
-                        # history: most likely resolved and redeemed. Only settle if
-                        # the actual outcome for this token can be read.
+                        # Not held on-chain and no recent SELL trade found.
+                        # It might be resolved, or the API might be lagging.
+                        # Only settle if the actual outcome for this token can be read.
                         sell_price, reason = self._resolved_price_for_token(pt.get("market_id"), tok)
                         if sell_price is None:
                             print(f"[live_broker] Leaving {pt.get('trade_id')} PENDING -- {reason}")

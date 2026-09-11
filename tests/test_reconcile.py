@@ -44,17 +44,19 @@ lb.get_session = lambda name=None: sess
 out = lb.reconcile_positions()
 by_tok = {r["trade_id"]: r for r in out}
 
-# 1. The never-filled position is VOIDED, not settled as a win
-v = by_tok[p_phantom["trade_id"]]
-assert v["voided"] is True and v["pnl"] == 0.0, v
+# 1. A position with no on-chain buy and no balance is NOT settled as a win.
+#    Automatic voiding was deliberately removed upstream (commit 7c444cd) as too
+#    aggressive -- an incomplete trade-history page could erase a real trade. So the
+#    requirement here is the safety property: it must never be booked as a WIN or a
+#    LOSS on a guess. Without a readable outcome it stays PENDING for manual review.
+assert p_phantom["trade_id"] not in by_tok, \
+    f"a position with no confirmable outcome was auto-settled: {by_tok.get(p_phantom['trade_id'])}"
 row = [r for r in database.get_all_trades(limit=50) if r["trade_id"] == p_phantom["trade_id"]][0]
-assert row["result"] == "VOID" and row["pnl"] == 0.0, row
-print("PASS never-filled position is VOIDED with zero P&L (was: booked as a WIN)")
+assert row["result"] == "PENDING", f"expected PENDING, got {row['result']} (pnl={row['pnl']})"
+assert float(row["pnl"] or 0.0) == 0.0, row
+print("PASS unconfirmable position left PENDING, never guessed as a WIN")
 
-# 2. ...and it is gone from state.json, so it stops rendering under Open Positions
 b2 = paper_broker.PaperBroker()
-assert b2._find_position_key("700000001") is None, "phantom still in state.json"
-print("PASS voided position removed from state.json, not just trades.db")
 
 # 3. The genuinely sold position settles at the real fill price
 sold = by_tok[p_sold["trade_id"]]

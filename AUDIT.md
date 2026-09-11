@@ -22,13 +22,22 @@ position. So:
   the `state.json` entry was never cleared either. Together: a position that had been
   sold, kept rendering as open, reporting "already exited" on every retry.
 * **A `min_order_size` pre-flight check added during the first round of fixes was
-  wrong and has been removed.** It blocked orders the exchange demonstrably accepts.
-  The SDK never validates against that field either; it is book metadata whose
-  semantics are not documented well enough to gate real orders on. The exchange
-  decides, and fill verification ensures a rejection is recorded as a rejection.
+  wrong and no longer blocks anything.** It refused orders the exchange demonstrably
+  accepts. The SDK never validates against that field either; it is book metadata
+  whose semantics are not documented well enough to gate real orders on. The buy path
+  now logs it and submits anyway, and the scanner no longer uses it to hide signals
+  (that filter silently emptied the feed whenever `stake_per_trade` was small). The
+  exchange decides, and fill verification ensures a refusal is recorded as a refusal.
 
-Fixes: `DUST_SHARE_THRESHOLD` in reconciliation, exits sized from the on-chain
-balance rather than the local record, and both `min_order_size` gates removed.
+Fixes: `DUST_SHARE_THRESHOLD` in reconciliation, exits sized from the on-chain balance
+rather than the local record, and both `min_order_size` gates defanged.
+
+**Automatic voiding was removed upstream** (commit `7c444cd`) as too aggressive — an
+incomplete page of trade history could erase a real trade. Reconciliation now leaves
+anything it cannot confirm as `PENDING`. The safety property still holds and is tested:
+an unconfirmable position is never booked as a win or a loss on a guess. An explicit
+user-initiated exit on a position the wallet does not hold still clears it, so stuck
+rows remain recoverable from the UI.
 
 ## Status
 
@@ -43,7 +52,7 @@ Everything below has been fixed. Regression tests covering the behaviour live in
 | C3 | Bot resurrected deleted positions | Fixed — state lock + `reload()` |
 | C4 | UMA-resolved markets booked as wins | Fixed |
 | C5 | 10h-elapsed positions auto-settled at 1.0 | Fixed — left PENDING and flagged |
-| C6 | Reconciliation invented wins; ran on every render | Fixed — VOID path, explicit trigger only |
+| C6 | Reconciliation invented wins; ran on every render | Fixed — confirmed outcomes only, explicit trigger only |
 | H1 | Live exits not fill-verified | Fixed |
 | H2 | Manual trigger bypassed kill switch / could leave orders untracked | Fixed |
 | H3 | Simulated balance gated live trades | Fixed |

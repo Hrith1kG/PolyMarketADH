@@ -42,175 +42,7 @@ st.set_page_config(
 # (status pills, the nav underline, the read-only notice banner).
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-
-    :root {
-        --bg-page: #0A0D12;
-        --bg-header: #0D1118;
-        --bg-card-1: #0F1420;
-        --bg-card-2: #111622;
-        --bg-card-3: #111826;
-        --border-card: #1E2733;
-        --border-header: #1B2330;
-        --divider-row: #161D29;
-        --border-dashed: #2A3646;
-        --text-primary: #E7ECF3;
-        --text-secondary: #C4CDDB;
-        --text-muted-1: #9BA8BC;
-        --text-muted-2: #8B98AC;
-        --text-muted-3: #7C8AA0;
-        --accent: #4C8DE8;
-        --accent-link: #6BA8F0;
-        --success: #4ADE80;
-        --success-bg: rgba(74, 222, 128, 0.15);
-        --danger: #F87171;
-        --danger-bg: rgba(248, 113, 113, 0.15);
-    }
-
-    html, body, [class*="css"] {
-        font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    .stApp { background: var(--bg-page); }
-
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: var(--bg-page); }
-    ::-webkit-scrollbar-thumb { background: #26303E; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
-
-    /* ---------- Sidebar ---------- */
-    section[data-testid="stSidebar"] {
-        background: var(--bg-header);
-        border-right: 1px solid var(--border-header);
-    }
-    section[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
-
-    /* ---------- Typography ---------- */
-    h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.01em; color: var(--text-primary); }
-    h1 { font-weight: 700 !important; }
-    h2, h3 { font-weight: 600 !important; }
-    p, span, label, .stMarkdown { color: var(--text-muted-1); }
-    code, .stCodeBlock, .stCode { font-family: 'IBM Plex Mono', monospace !important; }
-    a { color: var(--accent-link) !important; }
-
-    /* ---------- Metric cards ---------- */
-    div[data-testid="stMetric"] {
-        background: var(--bg-card-2);
-        border: 1px solid var(--border-card);
-        border-radius: 10px;
-        padding: 14px 18px;
-    }
-    div[data-testid="stMetricLabel"] p {
-        font-size: 0.68rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.6px;
-        color: var(--text-muted-3);
-    }
-    div[data-testid="stMetricValue"] {
-        font-family: 'Space Grotesk', sans-serif;
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: var(--text-primary);
-    }
-    div[data-testid="stMetricDelta"] { font-family: 'IBM Plex Mono', monospace; }
-
-    /* ---------- Containers used as cards (st.container(border=True)) ---------- */
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background: var(--bg-card-1);
-        border: 1px solid var(--border-card) !important;
-        border-radius: 12px !important;
-    }
-
-    /* ---------- Nav tabs ---------- */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 4px;
-        background: transparent;
-        border-bottom: 1px solid var(--border-header);
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 40px;
-        border-radius: 8px 8px 0 0;
-        color: var(--text-muted-3);
-        font-family: 'Space Grotesk', sans-serif;
-        font-weight: 600;
-        font-size: 0.82rem;
-        letter-spacing: 0.2px;
-        background: transparent;
-        border-bottom: 2px solid transparent;
-    }
-    .stTabs [aria-selected="true"] {
-        background: var(--bg-card-3) !important;
-        color: var(--text-primary) !important;
-        border-bottom: 2px solid var(--accent) !important;
-        box-shadow: none !important;
-    }
-
-    /* ---------- Buttons ---------- */
-    .stButton > button, .stFormSubmitButton > button, .stLinkButton > a {
-        border-radius: 8px;
-        border: 1px solid var(--border-card);
-        background: var(--bg-card-2);
-        color: var(--text-primary);
-        font-family: 'IBM Plex Mono', monospace;
-        font-weight: 600;
-        font-size: 0.82rem;
-        transition: all 0.15s ease;
-    }
-    .stButton > button:hover, .stFormSubmitButton > button:hover, .stLinkButton > a:hover {
-        border-color: var(--accent);
-        color: var(--accent-link);
-    }
-    .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
-        background: var(--accent);
-        border: none;
-        color: #08121F;
-    }
-    .stButton > button[kind="primary"]:hover, .stFormSubmitButton > button[kind="primary"]:hover {
-        filter: brightness(1.08);
-        color: #08121F;
-    }
-
-    /* ---------- Toggles (Live Trading / Kill Switch pill switches) ---------- */
-    div[data-testid="stToggle"] label div[data-baseweb="checkbox"] > div:first-child {
-        background: var(--border-card) !important;
-    }
-    div[data-testid="stToggle"] label div[aria-checked="true"] > div:first-child {
-        background: var(--accent) !important;
-    }
-
-    /* ---------- Badges / pills ---------- */
-    .stBadge, span[data-testid="stBadge"] { font-family: 'IBM Plex Mono', monospace; font-weight: 700 !important; letter-spacing: 0.3px; }
-
-    /* ---------- Inputs, selects, expanders ---------- */
-    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="base-input"] {
-        background: var(--bg-header) !important;
-        border-color: var(--border-card) !important;
-        border-radius: 8px !important;
-    }
-    .streamlit-expanderHeader, div[data-testid="stExpander"] {
-        background: var(--bg-card-2);
-        border: 1px solid var(--border-card) !important;
-        border-radius: 10px !important;
-    }
-
-    /* ---------- Dataframes / tables ---------- */
-    div[data-testid="stDataFrame"], div[data-testid="stTable"] {
-        border: 1px solid var(--border-card);
-        border-radius: 12px;
-        overflow: hidden;
-    }
-
-    /* ---------- Segmented control (used for filters / view switches) ---------- */
-    div[data-testid="stSegmentedControl"] label {
-        font-family: 'IBM Plex Mono', monospace !important;
-        font-size: 0.75rem !important;
-    }
-
-    hr { border-color: var(--border-header) !important; }
-    div[data-testid="stAlert"] { border-radius: 10px; border: 1px solid var(--border-card); }
-
-    /* ---------- Header bar ---------- */
+    /* ---------- Header bar (Custom HTML) ---------- */
     .sst-header {
         display: flex;
         align-items: center;
@@ -219,63 +51,68 @@ st.markdown("""
         gap: 12px;
         padding: 16px 24px;
         margin: -1rem -1rem 22px -1rem;
-        background: var(--bg-header);
-        border-bottom: 1px solid var(--border-header);
+        background: #0D1118;
+        border-bottom: 1px solid #1B2330;
     }
     .sst-brand { display: flex; align-items: center; gap: 12px; }
     .sst-logo {
-        width: 30px; height: 30px; border-radius: 8px; background: var(--accent);
+        width: 30px; height: 30px; border-radius: 8px; background: #4C8DE8;
         display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
-    .sst-logo-mark { width: 10px; height: 10px; background: var(--bg-page); transform: rotate(45deg); }
-    .sst-brand-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 17px; letter-spacing: 0.3px; color: var(--text-primary); }
-    .sst-brand-sub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted-3); letter-spacing: 0.4px; }
+    .sst-logo-mark { width: 10px; height: 10px; background: #0A0D12; transform: rotate(45deg); }
+    .sst-brand-title { font-weight: 700; font-size: 17px; letter-spacing: 0.3px; color: #E7ECF3; }
+    .sst-brand-sub { font-size: 11px; color: #7C8AA0; letter-spacing: 0.4px; }
     .sst-status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .sst-status-pill {
         display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px;
-        background: var(--bg-card-3); border: 1px solid var(--border-card);
-        font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+        background: #111826; border: 1px solid #1E2733;
+        font-size: 12px;
     }
     .sst-status-pill .dot { width: 7px; height: 7px; border-radius: 50%; }
-    .sst-status-pill .lbl { color: var(--text-muted-1); margin-right: 2px; }
-    .sst-status-pill .val { font-weight: 600; color: var(--text-primary); }
+    .sst-status-pill .lbl { color: #9BA8BC; margin-right: 2px; }
+    .sst-status-pill .val { font-weight: 600; color: #E7ECF3; }
     .sst-status-pill.kill-active { background: rgba(248,113,113,0.12); border-color: rgba(248,113,113,0.4); }
 
     /* ---------- Status banner (Overview) ---------- */
     .sst-banner {
         display: flex; align-items: center; gap: 16px; padding: 18px 22px; border-radius: 12px;
-        background: linear-gradient(90deg, #111826, #0F141D); border: 1px solid var(--border-card);
+        background: linear-gradient(90deg, #111826, #0F141D); border: 1px solid #1E2733;
         margin-bottom: 20px; flex-wrap: wrap;
     }
     .sst-banner-icon {
         width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
     .sst-banner-icon .core { width: 14px; height: 14px; border-radius: 50%; }
-    .sst-banner-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 18px; color: var(--text-primary); }
-    .sst-banner-sub { font-size: 13px; color: var(--text-muted-2); margin-top: 2px; }
+    .sst-banner-title { font-weight: 700; font-size: 18px; color: #E7ECF3; }
+    .sst-banner-sub { font-size: 13px; color: #8B98AC; margin-top: 2px; }
 
     /* ---------- Read-only notice (Collaborator View) ---------- */
     .sst-readonly-notice {
         display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 8px;
-        background: var(--bg-card-2); border: 1px dashed var(--border-dashed); margin-bottom: 20px;
-        font-size: 12px; color: var(--text-muted-2);
+        background: #111622; border: 1px dashed #2A3646; margin-bottom: 20px;
+        font-size: 12px; color: #8B98AC;
     }
     .sst-readonly-notice .dot { width: 8px; height: 8px; border-radius: 50%; background: #5C6B82; flex-shrink: 0; }
 
     /* ---------- Section subtitle ---------- */
-    .sst-section-sub { color: var(--text-muted-3); font-size: 0.85rem; margin-top: -8px; margin-bottom: 18px; }
+    .sst-section-sub { color: #7C8AA0; font-size: 0.85rem; margin-top: -8px; margin-bottom: 18px; }
 
     /* ---------- ENFORCED / result pills inside markdown ---------- */
     .sst-pill-enforced {
-        font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600; padding: 3px 8px;
-        border-radius: 10px; background: var(--success-bg); color: var(--success);
+        font-size: 10px; font-weight: 600; padding: 3px 8px;
+        border-radius: 10px; background: rgba(74, 222, 128, 0.15); color: #4ADE80;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
+@st.cache_resource
 def get_broker() -> PaperBroker:
     return PaperBroker()
+
+@st.cache_data(ttl=10, show_spinner=False)
+def get_db_trades(limit: int = 200, broker_filter: str = None, account_filter: str = None):
+    return database.get_all_trades(limit=limit, broker_filter=broker_filter, account_filter=account_filter)
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -533,7 +370,7 @@ def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
         .properties(height=height, background="transparent")
         .configure_view(strokeWidth=0)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +386,7 @@ def render_pnl_bar_chart(trades_for_chart: list, height: int = 160):
 
 @st.cache_data(ttl=8, show_spinner=False)
 def _cached_all_trades(broker_filter=None, account_filter=None):
-    return database.get_all_trades(broker_filter=broker_filter, account_filter=account_filter)
+    return get_db_trades(broker_filter=broker_filter, account_filter=account_filter)
 
 
 @st.cache_data(ttl=8, show_spinner=False)
@@ -658,7 +495,7 @@ def is_settled_trade(trade) -> bool:
     return "PENDING" not in result and result != "VOID"
 
 
-def execute_exit(position_key, position, exit_price, key_prefix=""):
+def execute_exit(position_key, position, exit_price, order_type="LIMIT", key_prefix=""):
     """Exits one position. Returns True when the caller should st.rerun()."""
     mode = str(position.get("mode", execution_mode_str)).upper()
     trade_id = position.get("trade_id")
@@ -697,7 +534,7 @@ def execute_exit(position_key, position, exit_price, key_prefix=""):
 
     try:
         with st.spinner(f"Submitting sell order on CLOB for {account_name}..."):
-            outcome = live_inst.exit_position(account_name, token_id, size=shares_held, price=exit_price)
+            outcome = live_inst.exit_position(account_name, token_id, size=shares_held, price=exit_price, order_type=order_type)
     except Exception as ex:
         if live_broker.is_no_balance_rejection(None, str(ex)):
             return _reconcile_after_failed_exit(live_inst, account_name, trade_id, token_id, _clear_phantom)
@@ -808,16 +645,16 @@ with st.sidebar:
 
         st.write("")
         if status == "RUNNING":
-            if st.button("Pause", icon=":material/pause:", use_container_width=True):
+            if st.button("Pause", icon=":material/pause:", width="stretch"):
                 settings_manager.update_setting("bot_status", "PAUSED")
                 st.rerun()
         else:
-            if st.button("Resume", icon=":material/play_arrow:", use_container_width=True, type="primary"):
+            if st.button("Resume", icon=":material/play_arrow:", width="stretch", type="primary"):
                 settings_manager.update_setting("bot_status", "RUNNING")
                 st.rerun()
 
         st.write("")
-        if st.button("🚨 PANIC KILL-SWITCH", help="Immediately stops opening any new positions", use_container_width=True):
+        if st.button("🚨 PANIC KILL-SWITCH", help="Immediately stops opening any new positions", width="stretch"):
             settings_manager.update_setting("entry_kill_switch", True)
             st.error("PANIC KILL-SWITCH ACTIVATED! New orders blocked.")
             st.rerun()
@@ -954,7 +791,7 @@ with st.sidebar:
             )
 
         st.write("")
-        saved = st.form_submit_button("💾 Save & Apply Config", use_container_width=True, type="primary")
+        saved = st.form_submit_button("💾 Save & Apply Config", width="stretch", type="primary")
         if saved:
             updated_settings = {
                 "poll_interval_seconds": poll_interval,
@@ -1070,12 +907,14 @@ with tab_overview:
         # books (settling and voiding trades), and running it on every Streamlit
         # rerun meant it fired on page load and on every widget interaction. It is
         # now only triggered explicitly, by the Sync and Refresh buttons.
-        db_pending = [t for t in database.get_all_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
-        existing_tokens = {str(p.get("token_id")) for p in all_known_positions.values()}
+        db_pending = [t for t in get_db_trades(limit=200) if str(t.get("result", "")).upper() == "PENDING"]
+        existing_trade_ids = {str(p.get("trade_id")) for p in all_known_positions.values() if p.get("trade_id")}
         for pt in db_pending:
             pt_tok = str(pt.get("token_id", ""))
-            if pt_tok and pt_tok not in existing_tokens:
-                pos_k = f"{pt.get('account_name', 'acc')}_{pt_tok}"
+            tr_id = str(pt.get("trade_id", ""))
+            if pt_tok and tr_id and tr_id not in existing_trade_ids:
+                pt_acc = str(pt.get("account_name", "acc"))
+                pos_k = f"{pt_acc}_{pt_tok}_{int(time.time()*1000)}"
                 all_known_positions[pos_k] = {
                     "trade_id": pt.get("trade_id"),
                     "mode": str(pt.get("broker", pt.get("mode", "paper"))).upper(),
@@ -1091,7 +930,7 @@ with tab_overview:
                     "stake": float(pt.get("cost", pt.get("stake", 0.0)) or 0.0),
                     "time_left": str(pt.get("time_left", "0.0m")),
                 }
-                existing_tokens.add(pt_tok)
+                existing_trade_ids.add(tr_id)
     except Exception:
         pass
 
@@ -1131,7 +970,7 @@ with tab_overview:
         )
     with banner_col2:
         st.write("")
-        if st.button("SCAN NOW", icon=":material/radar:", type="primary", use_container_width=True, key="overview_scan_now"):
+        if st.button("SCAN NOW", icon=":material/radar:", type="primary", width="stretch", key="overview_scan_now"):
             settings_manager.update_setting("manual_scan_requested", True)
             with st.spinner("Scanning Polymarket sports markets..."):
                 opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
@@ -1162,7 +1001,7 @@ with tab_overview:
             pos_filter_opts = [f"Active ({execution_mode_str.upper()})", f"All ({len(all_known_positions)})"]
             selected_pos_view = st.segmented_control("Filter Positions", pos_filter_opts, default=pos_filter_opts[0], key="ov_pos_filter_choice", label_visibility="collapsed") or pos_filter_opts[0]
         with col_pos_sync:
-            if st.button("Sync", icon=":material/sync:", help="Sync active positions with on-chain Polymarket trades & fills", key="ov_sync_onchain", use_container_width=True):
+            if st.button("Sync", icon=":material/sync:", help="Sync active positions with on-chain Polymarket trades & fills", key="ov_sync_onchain", width="stretch"):
                 reconciled_list = []
                 live_inst = live_broker.get_live_broker()
                 if live_inst:
@@ -1209,7 +1048,7 @@ with tab_overview:
             st.dataframe(
                 pd.DataFrame(df_pos),
                 column_config={
-                    "Verify Trade": st.column_config.LinkColumn("Verify Trade", display_text="🔗 View ↗"),
+                    "Verify Trade": st.column_config.LinkColumn("Verify Trade", display_text="View ↗"),
                 },
                 hide_index=True,
             )
@@ -1225,7 +1064,7 @@ with tab_overview:
                     )
                     for bp in blocked:
                         st.caption(f"• **{str(bp.get('question',''))[:60]}** — {bp.get('settlement_blocked')}")
-            with st.expander("🔍 1-Click Verification, Exit & Settlement"):
+            with st.expander("1-Click Verification, Exit & Settlement", icon=":material/search:"):
                 for tid, p in list(positions.items()):
                     slug_val = p.get("slug") or database.resolve_market_slug(p.get("market_id"))
                     poly_url = database.get_polymarket_url(slug_val, p.get("market_id"))
@@ -1271,9 +1110,16 @@ with tab_overview:
                             pnl_color = "green" if est_pnl >= 0 else "red"
                             st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
 
+                            exit_order_type = st.selectbox(
+                                "Exit Order Type",
+                                options=["LIMIT", "MARKET"],
+                                index=0,
+                                key=f"ov_exit_type_{tid}"
+                            )
+
                             exit_btn_label = "Sell on CLOB" if pos_mode == "LIVE" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"ov_btn_exit_{tid}", width="stretch"):
-                                if execute_exit(tid, p, exit_p):
+                                if execute_exit(tid, p, exit_p, order_type=exit_order_type):
                                     st.rerun()
                     with qc4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
@@ -1296,42 +1142,52 @@ with tab_overview:
 
     with col_gates:
         st.markdown("##### Circuit Breakers")
-        st.dataframe(pd.DataFrame(build_gates_data())[["Rule", "Value"]], hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(build_gates_data())[["Rule", "Value"]], hide_index=True, width="stretch")
 
     st.write("")
     st.markdown("##### Live Market Signals")
     st.markdown('<div class="sst-section-sub">Opportunities passing your price, liquidity, and resolution-window filters right now.</div>', unsafe_allow_html=True)
-    if not signals:
-        st.info("No signals matching current threshold criteria in the latest scan. Click 'SCAN NOW' above or wait for the next loop.")
-    else:
-        df_signals = []
-        for s in signals:
-            slug = s.get("slug", "") or database.resolve_market_slug(s.get("market_id"))
-            poly_url = database.get_polymarket_url(slug, s.get("market_id"))
-            conf_price = float(s.get('confirmed_price', 0) or 0.0)
-            df_signals.append({
-                "Polymarket": poly_url,
-                "Match / Game": s.get("question"),
-                "Outcome": s.get("outcome_label"),
-                "Price": conf_price,
-                "Implied Win %": round(conf_price * 100, 1),
-                "24h Volume": float(s.get('volume', 0) or 0.0),
-                "Liquidity": float(s.get('liquidity', 0) or 0.0),
-                "End Date": s.get("end_date", "N/A"),
-            })
-        st.dataframe(
-            pd.DataFrame(df_signals),
-            column_config={
-                "Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 View Market ↗"),
-                "Price": st.column_config.NumberColumn("Price", format="$%.3f"),
-                "Implied Win %": st.column_config.ProgressColumn("Implied Win %", format="%.1f%%", min_value=0, max_value=100),
-                "24h Volume": st.column_config.NumberColumn("24h Volume", format="$%d"),
-                "Liquidity": st.column_config.NumberColumn("Liquidity", format="$%d"),
-            },
-            hide_index=True,
-        )
+    @st.fragment(run_every="10s")
+    def render_signals_table():
+        broker = get_broker()
+        state = broker.reload()
+        current_signals = state.get("signals", [])
+        if not current_signals:
+            st.info("No signals matching current threshold criteria in the latest scan. Click 'SCAN NOW' above or wait for the next loop.")
+        else:
+            df_signals = []
+            for s in current_signals:
+                slug = s.get("slug", "") or database.resolve_market_slug(s.get("market_id"))
+                poly_url = database.get_polymarket_url(slug, s.get("market_id"))
+                conf_price = float(s.get('confirmed_price', 0) or 0.0)
+                df_signals.append({
+                    "Polymarket": poly_url,
+                    "Match / Game": s.get("question"),
+                    "Outcome": s.get("outcome_label"),
+                    "Price": conf_price,
+                    "Implied Win %": round(conf_price * 100, 1),
+                    "24h Volume": float(s.get('volume', 0) or 0.0),
+                    "Liquidity": float(s.get('liquidity', 0) or 0.0),
+                    "End Date": s.get("end_date", "N/A"),
+                })
+            st.dataframe(
+                pd.DataFrame(df_signals),
+                column_config={
+                    "Polymarket": st.column_config.LinkColumn("Polymarket", display_text="View Market ↗"),
+                    "Price": st.column_config.NumberColumn("Price", format="$%.3f"),
+                    "Implied Win %": st.column_config.ProgressColumn("Implied Win %", format="%.1f%%", min_value=0, max_value=100),
+                    "24h Volume": st.column_config.NumberColumn("24h Volume", format="$%d"),
+                    "Liquidity": st.column_config.NumberColumn("Liquidity", format="$%d"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+            
+    render_signals_table()
 
-        with st.expander("🚀 Manual Trade Trigger", expanded=False):
+    if signals:
+
+        with st.expander("Manual Trade Trigger", icon=":material/rocket_launch:", expanded=False):
             st.write(f"Execute a trade in **{execution_mode_str}** mode on one of the detected signals:")
             signal_options = {f"{s['question'][:60]} ({s['outcome_label']} @ {s['confirmed_price']:.3f})": s for s in signals}
             selected_signal_name = st.selectbox("Select Signal to Trade", list(signal_options.keys()), key="overview_signal_select")
@@ -1341,7 +1197,7 @@ with tab_overview:
             sel_url = database.get_polymarket_url(sel_slug, selected_sig.get("market_id"))
             st.link_button(f"Inspect '{selected_sig.get('question')[:45]}...' on Polymarket", sel_url, icon=":material/open_in_new:")
 
-            col_stake, col_btn = st.columns([2, 1])
+            col_stake, col_type, col_btn = st.columns([1.5, 1.5, 1.5])
             with col_stake:
                 manual_stake = st.number_input(
                     "Trade Stake ($)",
@@ -1350,6 +1206,14 @@ with tab_overview:
                     value=float(max(1.0, min(500.0, float(settings.get("stake_per_trade", 25.0) or 25.0)))),
                     step=5.0,
                     key="overview_manual_stake_input",
+                )
+            with col_type:
+                order_type = st.selectbox(
+                    "Order Type",
+                    options=["LIMIT", "MARKET"],
+                    index=0,
+                    help="LIMIT waits for your exact price (can be partially filled or rest in the book). MARKET executes immediately at the best available price (bypasses size minimums but risks slippage).",
+                    key="overview_manual_order_type",
                 )
             with col_btn:
                 st.write("")
@@ -1406,7 +1270,7 @@ with tab_overview:
                                 st.stop()
 
                             try:
-                                results = live_inst.place_buy_selected(obj.token_id, obj.confirmed_price, eligible)
+                                results = live_inst.place_buy_selected(obj.token_id, obj.confirmed_price, eligible, order_type=order_type)
                                 any_change = False
                                 for res in results:
                                     if res["success"]:
@@ -1518,7 +1382,7 @@ with tab_control:
                     "Stake": f"${stake:.2f}",
                     "Status": "🟢 Enabled" if acc.get("enabled", True) else "⚪ Disabled",
                 })
-            st.dataframe(pd.DataFrame(acc_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(acc_rows), hide_index=True, width="stretch")
         else:
             st.info("No trading accounts configured yet.")
 
@@ -1530,7 +1394,7 @@ with tab_control:
             {"Setting": "Max Open Positions", "Value": str(int(settings.get("max_open_positions", 10)))},
             {"Setting": "Max Trades / Day", "Value": str(int(settings.get("max_trades_per_day", 10)))},
         ]
-        st.dataframe(pd.DataFrame(limits_data), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(limits_data), hide_index=True, width="stretch")
 
     st.write("")
     st.markdown("##### Full Circuit Breaker and Risk Gate Table")
@@ -1538,12 +1402,12 @@ with tab_control:
     st.dataframe(
         gates_df,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_config={"Status": st.column_config.TextColumn("Status")},
     )
 
     st.write("")
-    with st.expander("⚙️ Engine Controls (order limits & slippage)"):
+    with st.expander("Engine Controls (order limits & slippage)", icon=":material/settings:"):
         cp_col1, cp_col2 = st.columns(2)
         with cp_col1:
             current_max_pos = int(settings.get("max_open_positions", 10))
@@ -1564,7 +1428,7 @@ with tab_control:
             if slippage_input != current_slippage:
                 settings_manager.update_setting("max_slippage", slippage_input)
 
-    with st.expander("➕ Add / Manage Trading Accounts", expanded=not creds_ok):
+    with st.expander("Add / Manage Trading Accounts", icon=":material/add:", expanded=not creds_ok):
         st.caption("Add additional Polymarket wallets to trade from. Credentials are written to your local `.env` file only and are never sent anywhere else.")
 
         configured_accounts = config.get_configured_accounts()
@@ -1629,7 +1493,6 @@ with tab_control:
                                 live_broker.invalidate_live_broker_cache()
                                 st.info(f"Relayer credentials cleared for {acc['name']} (will pay its own gas, or fall back to the global RELAYER_API_KEY if set).")
                                 st.rerun()
-            st.divider()
         else:
             st.info("No trading accounts configured yet. Add one below to enable live trading.")
 
@@ -1813,7 +1676,7 @@ ACCOUNT_1_STAKE=25.0
         else:
             st.warning("Could not initialize Live Broker instance. Check terminal logs for details.")
 
-    with st.expander("🩺 Lifecycle State & Activity Logs"):
+    with st.expander("Lifecycle State & Activity Logs", icon=":material/medical_services:"):
         with st.container(horizontal=True):
             st.metric("Dashboard State", status, delta="ACTIVE" if status == "RUNNING" else "HALTED", delta_color="normal" if status == "RUNNING" else "inverse", border=True)
             st.metric("Execution Mode", execution_mode_str, delta="MAINNET" if is_live else "SANDBOX", delta_color="normal" if is_live else "off", border=True)
@@ -1822,7 +1685,7 @@ ACCOUNT_1_STAKE=25.0
         if not logs:
             st.info("No activity logs recorded yet.")
         else:
-            df_logs = [{"Time": item.get("timestamp", "")[:19].replace("T", " "), "Level": item.get("level", "INFO"), "Message": item.get("message", "")} for item in reversed(logs[-25:])]
+            df_logs = [{"Time": item.get("timestamp", "")[:19].replace("T", " "), "Level": item.get("level", "INFO"), "Message": item.get("message", "")} for item in reversed(logs[-100:])]
             st.dataframe(pd.DataFrame(df_logs), hide_index=True)
 
 
@@ -1944,7 +1807,7 @@ with tab_history:
     else:
         open_trades = [t for t in active_trades_for_table if "PENDING" in str(t.get("result", "")).upper()]
         if open_trades:
-            with st.expander(f"⚡ Active Open Trades ({len(open_trades)} active)", expanded=False):
+            with st.expander(f"Active Open Trades ({len(open_trades)} active)", icon=":material/bolt:", expanded=False):
                 st.caption("Inspect live odds on Polymarket or immediately settle completed matches:")
                 for ot_idx, ot in enumerate(open_trades):
                     ot_slug = ot.get("slug") or database.resolve_market_slug(ot.get("market_id"))
@@ -1992,6 +1855,13 @@ with tab_history:
                             pnl_color = "green" if est_pnl >= 0 else "red"
                             st.markdown(f"Est. Return: **${est_return:.2f}** | P&L: :{pnl_color}[**${est_pnl:+.2f} ({pnl_pct:+.1f}%)**]")
 
+                            exit_order_type = st.selectbox(
+                                "Exit Order Type",
+                                options=["LIMIT", "MARKET"],
+                                index=0,
+                                key=f"h_exit_type_{ot_key}"
+                            )
+
                             exit_btn_label = "Sell on CLOB" if ot_broker == "live" else "Close Paper"
                             if st.button(exit_btn_label, icon=":material/point_of_sale:", type="primary", key=f"h_btn_exit_{ot_key}", width="stretch"):
                                 # trades.db rows use different key names than state.json
@@ -2004,7 +1874,7 @@ with tab_history:
                                     "shares": ot_tokens,
                                     "stake": float(ot.get("cost", 0.0) or 0.0),
                                 }
-                                if execute_exit(ot_tok, hist_position, exit_p):
+                                if execute_exit(ot_tok, hist_position, exit_p, order_type=exit_order_type):
                                     st.rerun()
                     with o_c4:
                         pop = st.popover("Settle", icon=":material/gavel:", width="stretch")
@@ -2062,11 +1932,11 @@ with tab_history:
             })
         st.dataframe(
             pd.DataFrame(table_rows),
-            column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 View Market ↗")},
+            column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="View Market ↗")},
             hide_index=True,
         )
 
-    with st.expander("🔗 Live On-Chain Wallet Activity (Data API)"):
+    with st.expander("Live On-Chain Wallet Activity (Data API)", icon=":material/link:"):
         tracked_addr = settings.get("tracked_wallet_address", "").strip()
         col_addr_in, col_fetch_btn = st.columns([3, 1])
         with col_addr_in:
@@ -2094,19 +1964,19 @@ with tab_history:
                 if not oc_positions:
                     st.info(f"No active positions found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_positions), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 Verify ↗")}, hide_index=True)
+                    st.dataframe(pd.DataFrame(oc_positions), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="Verify ↗")}, hide_index=True)
             with oc_t2:
                 if not oc_trades:
                     st.info(f"No recent filled trades found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_trades), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 View ↗")}, hide_index=True)
+                    st.dataframe(pd.DataFrame(oc_trades), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="View ↗")}, hide_index=True)
             with oc_t3:
                 if not oc_closed:
                     st.info(f"No historical settled positions found for {active_addr[:10]}...")
                 else:
-                    st.dataframe(pd.DataFrame(oc_closed), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="🔗 View ↗")}, hide_index=True)
+                    st.dataframe(pd.DataFrame(oc_closed), column_config={"Polymarket": st.column_config.LinkColumn("Polymarket", display_text="View ↗")}, hide_index=True)
 
-    with st.expander("🔍 Orphaned Trade Reconciliation"):
+    with st.expander("Orphaned Trade Reconciliation", icon=":material/search:"):
         st.caption(
             "PENDING trades recorded in `trades.db` with no matching open position in "
             "`state.json` -- e.g. after a portfolio reset or a manual state.json edit that "
@@ -2116,7 +1986,7 @@ with tab_history:
             "each one and decide: restore it as a tracked open position, settle it as "
             "WON/LOST, or delete it as stale data."
         )
-        all_pending = [t for t in database.get_all_trades(limit=1000) if str(t.get("result", "")).upper() == "PENDING"]
+        all_pending = [t for t in get_db_trades(limit=1000) if str(t.get("result", "")).upper() == "PENDING"]
         open_trade_ids = {p.get("trade_id") for p in state.get("positions", {}).values() if p.get("trade_id")}
         open_token_ids = {str(p.get("token_id")) for p in state.get("positions", {}).values()}
         orphaned_trades = [
@@ -2171,7 +2041,7 @@ with tab_history:
                                 st.session_state[confirm_del_key] = True
                                 st.rerun()
 
-    with st.expander("🧹 Paper Portfolio Maintenance"):
+    with st.expander("Paper Portfolio Maintenance", icon=":material/cleaning_services:"):
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             live_tracked = len([p for p in state.get("positions", {}).values() if str(p.get("mode", "PAPER")).upper() == "LIVE"])
@@ -2238,7 +2108,7 @@ with tab_collab:
                 "P&L $": pnl_disp,
                 "Result": res_tag,
             })
-        st.dataframe(pd.DataFrame(condensed_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(condensed_rows), hide_index=True, width="stretch")
 
     st.write("")
     st.markdown("##### Realized P&L, Last 10 Trades")
