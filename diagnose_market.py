@@ -44,25 +44,59 @@ def slug_from_arg(arg):
     return arg
 
 
-def resolve_markets(client, slug):
-    """The URL slug may be an event slug or a market slug; try both."""
-    try:
-        page = client.list_markets(slug=slug, page_size=100).first_page()
-        if page and page.items:
-            print(f"{INFO} matched {len(page.items)} market(s) by MARKET slug")
-            return list(page.items)
-    except Exception as exc:
-        print(f"{INFO} market-slug lookup failed: {type(exc).__name__}: {exc}")
+def _markets_of(ev):
+    return list(getattr(ev, "markets", None) or [])
 
+
+def resolve_markets(client, slug):
+    """The URL may name an event or a single market, and a resolved match is CLOSED.
+
+    Gamma excludes closed records by default (list_events has closed=False baked into
+    its signature), so every lookup here either targets closed records explicitly or
+    uses a by-id/by-url endpoint that ignores the closed flag entirely.
+    """
+    # NOTE: the SDK's url= lookup only accepts two-segment /event/<slug> or
+    # /market/<slug> paths, so a /sports/<league>/<slug> URL is rejected outright.
+    # It resolves to the same endpoint as slug= anyway, so we only use slug=.
+    attempts = [
+        ("get_event(slug=...)", lambda: _markets_of(client.get_event(slug=slug))),
+        ("get_market(slug=...)", lambda: [client.get_market(slug=slug)]),
+        ("list_events(slug=..., closed=True)",
+         lambda: [m for ev in (client.list_events(slug=slug, closed=True, page_size=20)
+                               .first_page().items or []) for m in _markets_of(ev)]),
+        ("list_markets(slug=...)",
+         lambda: list(client.list_markets(slug=slug, page_size=100).first_page().items or [])),
+    ]
+
+    for label, fn in attempts:
+        try:
+            found = [m for m in (fn() or []) if m is not None]
+        except Exception as exc:
+            print(f"{INFO} {label:<36} -> {type(exc).__name__}: {exc}")
+            continue
+        if found:
+            print(f"{INFO} {label:<36} -> matched {len(found)} market(s)")
+            return found
+        print(f"{INFO} {label:<36} -> no match")
+
+    # Last resort: free-text search, explicitly keeping closed markets.
+    terms = " ".join(p for p in slug.split("-") if not p.isdigit() and len(p) > 2)
+    print(f"{INFO} falling back to search(q={terms!r}, keep_closed_markets=1)")
     try:
-        page = client.list_events(slug=slug, page_size=10).first_page()
-        if page and page.items:
-            ev = page.items[0]
-            mkts = list(ev.markets or [])
-            print(f"{INFO} matched EVENT '{getattr(ev, 'title', slug)}' with {len(mkts)} market(s)")
-            return mkts
+        page = client.search(q=terms, keep_closed_markets=1, page_size=10).first_page()
+        for res in (page.items or []):
+            for ev in (getattr(res, "events", None) or []):
+                ms = _markets_of(ev)
+                if ms:
+                    print(f"{INFO} search matched event '{getattr(ev, 'title', '?')}' "
+                          f"(slug={getattr(ev, 'slug', '?')}) with {len(ms)} market(s)")
+                    return ms
+            for m in (getattr(res, "markets", None) or []):
+                print(f"{INFO} search matched market '{getattr(m, 'question', '?')}' "
+                      f"(slug={getattr(m, 'slug', '?')})")
+                return [m]
     except Exception as exc:
-        print(f"{INFO} event-slug lookup failed: {type(exc).__name__}: {exc}")
+        print(f"{INFO} search failed: {type(exc).__name__}: {exc}")
     return []
 
 
@@ -74,6 +108,12 @@ def diagnose(market, s):
     st = market.state
     sp = market.sports
     me = market.metrics
+
+    if st and st.closed:
+        print("\n  !! THIS MARKET IS ALREADY CLOSED/RESOLVED. Volume, liquidity, prices\n"
+              "     and the order book below are TODAY's values, not what the scanner saw\n"
+              "     at the time of the miss. The TIMING block is still exact -- end_date\n"
+              "     and game_start_time do not change after resolution.")
 
     # ---- The answer to "when did it resolve" ----
     print("\n-- TIMING (resolution window) --")
