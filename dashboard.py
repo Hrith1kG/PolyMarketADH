@@ -1685,7 +1685,7 @@ ACCOUNT_1_STAKE=25.0
         if not logs:
             st.info("No activity logs recorded yet.")
         else:
-            df_logs = [{"Time": item.get("timestamp", "")[:19].replace("T", " "), "Level": item.get("level", "INFO"), "Message": item.get("message", "")} for item in reversed(logs[-25:])]
+            df_logs = [{"Time": item.get("timestamp", "")[:19].replace("T", " "), "Level": item.get("level", "INFO"), "Message": item.get("message", "")} for item in reversed(logs[-100:])]
             st.dataframe(pd.DataFrame(df_logs), hide_index=True)
 
 
