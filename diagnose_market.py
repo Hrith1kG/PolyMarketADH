@@ -1,0 +1,246 @@
+"""Explains why a given Polymarket market did or did not qualify as a signal.
+
+Replays every gate in scanner.find_opportunities() in the same order, against your
+live settings.json, and prints PASS/FAIL with the actual value next to the threshold.
+
+Usage:
+    python diagnose_market.py atp-martine-aboian-2026-09-11
+    python diagnose_market.py https://polymarket.com/sports/atp/atp-martine-aboian-2026-09-11
+"""
+import sys
+from datetime import datetime, timezone, timedelta
+
+from polymarket import RateLimitError, PolymarketError
+import polymarket_client
+import settings_manager
+import scanner
+
+OK, NO, INFO = "PASS", "FAIL", "  ->"
+_verdicts = []
+
+
+def check(label, passed, detail):
+    _verdicts.append((label, passed))
+    print(f"  [{OK if passed else NO}] {label:<34} {detail}")
+    return passed
+
+
+def fmt_dt(dt):
+    if dt is None:
+        return "None"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    delta = dt - now
+    hrs = delta.total_seconds() / 3600.0
+    rel = f"{hrs:+.2f}h ({delta.days:+d}d)" if abs(hrs) >= 1 else f"{delta.total_seconds():+.0f}s"
+    return f"{dt.isoformat()}  [{rel} from now]"
+
+
+def slug_from_arg(arg):
+    arg = arg.strip().rstrip("/")
+    if "polymarket.com" in arg:
+        return arg.split("/")[-1].split("?")[0]
+    return arg
+
+
+def resolve_markets(client, slug):
+    """The URL slug may be an event slug or a market slug; try both."""
+    try:
+        page = client.list_markets(slug=slug, page_size=100).first_page()
+        if page and page.items:
+            print(f"{INFO} matched {len(page.items)} market(s) by MARKET slug")
+            return list(page.items)
+    except Exception as exc:
+        print(f"{INFO} market-slug lookup failed: {type(exc).__name__}: {exc}")
+
+    try:
+        page = client.list_events(slug=slug, page_size=10).first_page()
+        if page and page.items:
+            ev = page.items[0]
+            mkts = list(ev.markets or [])
+            print(f"{INFO} matched EVENT '{getattr(ev, 'title', slug)}' with {len(mkts)} market(s)")
+            return mkts
+    except Exception as exc:
+        print(f"{INFO} event-slug lookup failed: {type(exc).__name__}: {exc}")
+    return []
+
+
+def diagnose(market, s):
+    print("=" * 78)
+    print(f"MARKET: {market.question or market.slug}")
+    print(f"  id={market.id}  slug={market.slug}")
+
+    st = market.state
+    sp = market.sports
+    me = market.metrics
+
+    # ---- The answer to "when did it resolve" ----
+    print("\n-- TIMING (resolution window) --")
+    end_dt = st.end_date if st else None
+    start_dt = sp.game_start_time if sp else None
+    print(f"{INFO} end_date (RESOLUTION TIME): {fmt_dt(end_dt)}")
+    print(f"{INFO} game_start_time:            {fmt_dt(start_dt)}")
+
+    late = bool(s.get("late_game_enabled", False))
+    min_hours = float(s.get("min_hours_to_resolution", 1.0))
+    max_days = float(s.get("max_days_to_resolution", 30.0))
+    eff_min_hours = 0.0 if late else min_hours
+
+    if st:
+        check("state.closed is False", not st.closed, f"closed={st.closed}")
+        check("accepting_orders", st.accepting_orders is not False,
+              f"accepting_orders={st.accepting_orders}")
+        in_win = scanner._within_resolution_window(end_dt, eff_min_hours, max_days)
+        hrs = ((end_dt.replace(tzinfo=timezone.utc) if end_dt and end_dt.tzinfo is None else end_dt)
+               - datetime.now(timezone.utc)).total_seconds() / 3600.0 if end_dt else None
+        check("resolution window", in_win,
+              f"{hrs:+.2f}h to resolve; need >= {eff_min_hours}h and <= {max_days}d"
+              + ("  (late_game ON -> floor waived)" if late else ""))
+        if late:
+            ok = scanner._late_game_ok(start_dt, end_dt,
+                                       float(s.get("late_game_threshold_seconds", 600)),
+                                       bool(s.get("require_authoritative_time", False)))
+            check("late_game_ok", ok,
+                  f"threshold={s.get('late_game_threshold_seconds')}s, "
+                  f"require_authoritative_time={s.get('require_authoritative_time')}")
+
+    # ---- Category filters ----
+    print("\n-- CATEGORY / TYPE --")
+    mtype = sp.sports_market_types if sp else None
+    print(f"{INFO} market.sports = {sp!r}")
+    print(f"{INFO} sports_market_type on market = {mtype!r}")
+    if s.get("only_sports", True):
+        want = s.get("sports_market_types", ["moneyline"])
+        print(f"{INFO} scanner queries tag_id={s.get('sports_tag_id')} "
+              f"sports_market_types={want}")
+        print(f"{INFO} NOTE: these are server-side query filters. If this market does not "
+              f"carry\n       that tag/type, the scanner never sees it at all.")
+
+    # ---- Metrics ----
+    print("\n-- LIQUIDITY / VOLUME --")
+    vol = float(me.volume or 0.0) if me else 0.0
+    liq = float(me.liquidity or 0.0) if me else 0.0
+    check("volume >= min_volume", vol >= float(s.get("min_volume", 5000.0)),
+          f"volume={vol:,.2f} vs min={float(s.get('min_volume', 5000.0)):,.2f}")
+    check("liquidity >= min_liquidity", liq >= float(s.get("min_liquidity", 1000.0)),
+          f"liquidity={liq:,.2f} vs min={float(s.get('min_liquidity', 1000.0)):,.2f}")
+
+    # ---- Per-outcome ----
+    pmin = float(s.get("price_min", 0.97))
+    pmax = float(s.get("price_max", 0.995))
+    stake = float(s.get("stake_per_trade", 25.0) or 0.0)
+    healthy = bool(s.get("require_healthy_data", True))
+    hiconf = bool(s.get("require_high_confidence", False))
+    client = polymarket_client.get_public_client()
+
+    if not market.outcomes:
+        print("\n-- OUTCOMES --\n  [FAIL] market.outcomes is empty")
+        return
+
+    for outcome in [market.outcomes.yes, market.outcomes.no]:
+        if not outcome or not outcome.token_id:
+            continue
+        print(f"\n-- OUTCOME: {outcome.label}  (token {str(outcome.token_id)[:18]}...) --")
+        if outcome.price is None:
+            check("gamma price present", False, "outcome.price is None")
+            continue
+        gp = float(outcome.price)
+        if not check("gamma price in band", pmin <= gp <= pmax,
+                     f"gamma_price={gp:.4f} vs band [{pmin}, {pmax}]"):
+            continue
+
+        if healthy or hiconf:
+            try:
+                ob = client.get_order_book(token_id=str(outcome.token_id))
+            except (RateLimitError, PolymarketError) as exc:
+                check("order book fetch", False, f"{type(exc).__name__}: {exc}")
+                continue
+            if not ob.bids or not ob.asks:
+                check("two-sided book", False,
+                      f"bids={len(ob.bids)} asks={len(ob.asks)}")
+                continue
+            bb = float(ob.bids[-1].price)   # bids ascending -> best last
+            ba = float(ob.asks[-1].price)   # asks descending -> best last
+            spread = ba - bb
+            max_spread = (scanner.CONFIDENCE_MAX_SPREAD if hiconf
+                          else scanner.HEALTH_MAX_SPREAD)
+            max_age = (scanner.CONFIDENCE_MAX_QUOTE_AGE_SECONDS if hiconf
+                       else scanner.HEALTH_MAX_QUOTE_AGE_SECONDS)
+            print(f"{INFO} best_bid={bb:.4f}  best_ask={ba:.4f}  "
+                  f"ask_size={float(ob.asks[-1].size or 0):.2f}  "
+                  f"tick={ob.tick_size}  min_order_size={ob.min_order_size}")
+            check("spread <= max", spread <= max_spread,
+                  f"spread={spread:.4f} vs max={max_spread} "
+                  f"({'high-confidence' if hiconf else 'healthy-data'} mode)")
+            if ob.timestamp is not None:
+                ts = ob.timestamp if ob.timestamp.tzinfo else ob.timestamp.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - ts).total_seconds()
+                check("quote age <= max", age <= max_age,
+                      f"age={age:.0f}s vs max={max_age}s  (book ts {ts.isoformat()})")
+            else:
+                print(f"{INFO} order book has no timestamp -> staleness check skipped")
+            if hiconf and stake > 0:
+                need = stake / gp if gp > 0 else 0.0
+                asz = float(ob.asks[-1].size or 0.0)
+                check("ask depth >= stake", asz >= need * scanner.CONFIDENCE_DEPTH_MULTIPLE,
+                      f"ask_size={asz:.2f} vs need={need:.2f} shares for ${stake}")
+            confirmed = ba
+        else:
+            try:
+                d = client.get_price(token_id=str(outcome.token_id), side="BUY")
+            except (RateLimitError, PolymarketError) as exc:
+                check("get_price", False, f"{type(exc).__name__}: {exc}")
+                continue
+            confirmed = float(d) if d is not None else None
+            if confirmed is None:
+                check("get_price non-null", False, "returned None")
+                continue
+
+        check("confirmed price in band", pmin <= confirmed <= pmax,
+              f"confirmed={confirmed:.4f} vs band [{pmin}, {pmax}]")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(2)
+    slug = slug_from_arg(sys.argv[1])
+    s = settings_manager.load_settings()
+
+    print(f"SLUG: {slug}")
+    print(f"NOW:  {datetime.now(timezone.utc).isoformat()}")
+    print("\n-- ACTIVE SETTINGS THAT GATE SIGNALS --")
+    for k in ("price_min", "price_max", "min_volume", "min_liquidity",
+              "min_hours_to_resolution", "max_days_to_resolution",
+              "max_signals_per_scan", "stake_per_trade", "only_sports",
+              "sports_market_types", "sports_tag_id", "require_healthy_data",
+              "require_high_confidence", "late_game_enabled",
+              "require_authoritative_time", "late_game_threshold_seconds"):
+        print(f"  {k:<30} = {s.get(k)!r}")
+
+    client = polymarket_client.get_public_client()
+    markets = resolve_markets(client, slug)
+    if not markets:
+        print("\nNo market found for that slug. It may be closed/archived, or the slug "
+              "is an event slug whose markets are not exposed via list_events.")
+        sys.exit(1)
+
+    for m in markets:
+        diagnose(m, s)
+
+    print("\n" + "=" * 78)
+    fails = [l for l, ok in _verdicts if not ok]
+    if fails:
+        print("BLOCKING GATES (first failure per outcome is what dropped it):")
+        for l in fails:
+            print(f"  - {l}")
+    else:
+        print("Every gate passed. If the bot still skipped it, the cause is downstream "
+              "of the scanner:\n  max_signals_per_scan truncation, held_token_ids, "
+              "bot_status=PAUSED, entry_kill_switch,\n  max_open_positions / "
+              "max_total_exposure / max_trades_per_day, or balance.")
+
+
+if __name__ == "__main__":
+    main()
