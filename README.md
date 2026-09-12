@@ -116,6 +116,47 @@ Measured against the live Gamma API and CLOB, which is worth knowing before you 
 | Resting size at the best ask ranged from **~18 to ~1400 shares** across assets | The depth gate is the one that bites most often -- see below |
 | `feeType: crypto_fees_v2`, `feeSchedule.rate` **0.07**, taker-only | **These markets charge a taker fee; the sports markets this bot was built for do not.** At a 0.95 entry the fee is roughly `0.07 x min(p, 1-p)` ≈ 0.0035/share, about 7% of the $0.05 gross edge. Budget for it: the strategy does not model fees, because the SDK's market model does not surface the fee schedule. |
 
+### Where in the round an entry is actually possible
+
+This is the most important empirical fact about the strategy, measured by sampling the live CLOB
+through a complete round (BTC, SOL and ETH, one second apart, t-141s to t-0):
+
+| Time left | BTC winning side | SOL winning side | ETH winning side |
+| --- | --- | --- | --- |
+| 141s | 0.28 bid / 0.29 ask | 0.43 / 0.45 | 0.22 / 0.23 |
+| 100s | 0.86 / 0.87 | 0.86 / 0.87 | 0.63 / 0.64 |
+| 80s | 0.92 / **0.93** x466 | 0.89 / 0.92 | 0.66 / 0.67 |
+| 70s | 0.96 / **0.97** x654 | 0.85 / 0.87 | 0.63 / 0.65 |
+| 60s | 0.95 / **0.96** x230 | 0.96 / **0.98** x26 | 0.69 / 0.71 |
+| 50s | 0.98 / **0.99** x3637 | 0.99 bid / **NO ASKS** | 0.86 / 0.87 |
+| 41s | 0.99 bid / **NO ASKS** | 0.99 bid / **NO ASKS** | 0.95 / **0.96** x30 |
+| 31s | 0.99 bid / **NO ASKS** | 0.99 bid / **NO ASKS** | 0.97 / 0.98 x**2** |
+| 21s and in | 0.99 bid / **NO ASKS** | 0.99 bid / **NO ASKS** | 0.99 bid / **NO ASKS** |
+
+Two things follow, and they decide how you configure this:
+
+1. **Near the end of a round, the winner is not for sale.** The winning side goes bid-only (0.99 bid,
+   no asks at all) and the losing side offer-only (0.01 ask, no bids). Nobody offers a near-certain
+   winner, so there is nothing to buy at any price. In the sample above that happened at ~50s for
+   SOL, ~41s for BTC and ~21s for ETH -- it varies by asset and by round, but by 30 seconds out it
+   had happened to two of the three.
+2. **The price only clears 0.90 late.** At 100s+ the favourite is still in the 0.6-0.8 range, below
+   the floor.
+
+So the executable region -- an ask at or above 0.90, with real size behind it -- is roughly
+**t-90s to t-40s**, and it closes from the outside in. `crypto_entry_window_seconds` is exactly the
+lever for this:
+
+* **30 (the shipped default, as specified)** -- correct, conservative, and will rarely fill. Two of
+  three assets had no offers left at all by then, and the third was offering 2 shares.
+* **60** -- catches BTC at 0.96 (230 shares) and SOL at 0.98 (26 shares) in the same round.
+* **90** -- also catches BTC at 0.93-0.97 with 400-650 shares resting.
+
+The default is left at 30 because that is what the strategy was specified to do. **If you want it to
+trade, raise it**; the cost is entering earlier, with more of the round still unresolved. Watch the
+`book_no_asks` skips in the log -- that reason dominating the final seconds is this effect, not a
+fault.
+
 **On the depth gate.** `crypto_min_ask_depth_multiple` (default 1.0) requires the best ask to hold
 enough resting size to fill your whole intended stake at the quoted price. With the default $25
 stake that is ~26 shares at 0.95, which several assets' books do not carry -- so expect
