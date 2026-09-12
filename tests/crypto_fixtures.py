@@ -34,6 +34,25 @@ class State:
         self.archived = archived
 
 
+class FeeSchedule:
+    def __init__(self, rate=0.07, exponent=1, taker_only=True, rebate_rate=0.2):
+        self.rate = rate
+        self.exponent = exponent
+        self.taker_only = taker_only
+        self.rebate_rate = rebate_rate
+
+
+class Trading:
+    """Market.trading, as the live API populates it for these rounds."""
+
+    def __init__(self, minimum_tick_size=0.01, minimum_order_size=5.0,
+                 fees_enabled=True, fee_schedule=None):
+        self.minimum_tick_size = minimum_tick_size
+        self.minimum_order_size = minimum_order_size
+        self.fees_enabled = fees_enabled
+        self.fee_schedule = fee_schedule if fee_schedule is not None else FeeSchedule()
+
+
 class Metrics:
     def __init__(self, volume=None, liquidity=0.0):
         self.volume = volume
@@ -46,7 +65,8 @@ class EventRef:
 
 
 class FakeMarket:
-    def __init__(self, id, slug, question, state, outcomes, metrics, events=()):
+    def __init__(self, id, slug, question, state, outcomes, metrics, events=(), trading=None):
+        self.trading = trading if trading is not None else Trading()
         self.id = id
         self.slug = slug
         self.question = question
@@ -82,6 +102,7 @@ def make_market(
     now=NOW,
     naive_timestamps=False,
     events=(),
+    trading=None,
     **state_kwargs,
 ):
     """Builds one round ending `seconds_left` from `now`.
@@ -121,6 +142,7 @@ def make_market(
         ),
         metrics=Metrics(volume, liquidity),
         events=tuple(EventRef(e) for e in events),
+        trading=trading,
     )
 
 
@@ -134,7 +156,9 @@ class FakeBook:
     """Order book shaped like the SDK's: bids ascending, asks descending, best last."""
 
     def __init__(self, best_bid=0.92, best_ask=0.94, ask_size=500.0, bid_size=500.0,
-                 timestamp=NOW, min_order_size=0.0, tick_size=0.001, one_sided=None):
+                 timestamp=NOW, min_order_size=5.0, tick_size=0.01, one_sided=None,
+                 token_id=None):
+        self.token_id = token_id
         self.bids = [] if one_sided == "no_bids" else [Level(best_bid - 0.05, bid_size), Level(best_bid, bid_size)]
         self.asks = [] if one_sided == "no_asks" else [Level(best_ask + 0.05, ask_size), Level(best_ask, ask_size)]
         self.timestamp = timestamp
@@ -160,12 +184,30 @@ class FakeClient:
         self.books = dict(books or {})
         self.list_calls = []
         self.book_calls = []
+        self.batch_calls = []
+        self.no_batch = False
         self.market_calls = []
         self.book_error = None
 
     def list_markets(self, **kwargs):
         self.list_calls.append(kwargs)
         return [FakePage(self.markets)]
+
+    def get_order_books(self, token_ids):
+        """Batch read, as the CLOB exposes it. Books echo their own token id."""
+        if self.no_batch:
+            raise AttributeError("batch endpoint unavailable")
+        self.batch_calls.append(list(token_ids))
+        if self.book_error is not None:
+            raise self.book_error
+        out = []
+        for t in token_ids:
+            book = self.books.get(t)
+            if book is None:
+                continue
+            book.token_id = t
+            out.append(book)
+        return tuple(out)
 
     def get_order_book(self, token_id):
         self.book_calls.append(token_id)

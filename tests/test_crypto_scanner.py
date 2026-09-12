@@ -222,4 +222,38 @@ assert result.error and "gamma is down" in result.error, result.error
 assert crypto_scanner.LAST_SCAN_ERROR == result.error
 print("PASS a broken scan reports an error instead of an empty result")
 
+# 14. Order books are read in ONE batch request per round, with a fall back to
+#     individual reads if the batch endpoint is unavailable.
+market = make_market(asset="btc", seconds_left=20, market_id="1300",
+                     tokens=("b-up", "b-down"), prices=(0.95, 0.05))
+books = {"b-up": FakeBook(best_bid=0.94, best_ask=0.95), "b-down": FakeBook(best_ask=0.05)}
+client = FakeClient([market], books)
+result = crypto_scanner.find_crypto_opportunities(
+    client=client, settings_override=settings(), now=NOW)
+assert len(result.opportunities) == 1, result.skipped
+assert client.batch_calls == [["b-up"]], client.batch_calls   # the cheap side is prefiltered out
+assert client.book_calls == [], "the batch call must not also fetch books one at a time"
+
+legacy = FakeClient([market], books)
+legacy.no_batch = True          # an SDK or endpoint without batch support
+result = crypto_scanner.find_crypto_opportunities(
+    client=legacy, settings_override=settings(), now=NOW)
+assert len(result.opportunities) == 1, result.skipped
+assert legacy.book_calls == ["b-up"], legacy.book_calls
+print("PASS books are read in one batch request, falling back to single reads")
+
+# 15. The taker fee is read from the market's own published schedule and carried
+#     on the signal, and the net-edge floor can refuse a fill that is not worth
+#     taking after it. Values match Polymarket's published fee table.
+opp = result.opportunities[0]
+assert abs(opp.taker_fee_per_share - 0.07 * 0.95 * 0.05) < 1e-9, opp.taker_fee_per_share
+assert abs(opp.net_edge_per_share - (0.05 - opp.taker_fee_per_share)) < 1e-9, opp.net_edge_per_share
+assert opp.tick_size == 0.01 and opp.min_order_size == 5.0, (opp.tick_size, opp.min_order_size)
+
+_client, result = scan([market], books, crypto_min_net_edge_per_share=0.05)
+assert result.opportunities == [] and cm.REASON_NET_EDGE in reasons(result), reasons(result)
+_client, result = scan([market], books, crypto_min_net_edge_per_share=0.04)
+assert len(result.opportunities) == 1, reasons(result)
+print("PASS the taker fee is read from the market and the net-edge floor is enforced")
+
 print("\nALL crypto_scanner TESTS PASSED")

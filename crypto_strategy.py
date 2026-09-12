@@ -38,7 +38,9 @@ from crypto_markets import (
     MarketRejected,
     REASON_EXPIRED,
     REASON_NOT_LIVE,
+    REASON_NET_EDGE,
     REASON_NO_BOOK,
+    REASON_OFF_TICK,
     REASON_PRICE_ABOVE_CEILING,
     REASON_PRICE_BELOW_THRESHOLD,
     REASON_RISK_BLOCKED,
@@ -224,6 +226,29 @@ class CryptoStrategy:
                 f"executable ask {ask:.4f} > {cfg['max_probability']:.4f} ceiling at submit time"
             ), 0.0
 
+        # The market publishes its own price grid; an off-grid limit price is
+        # rejected outright, so it is checked here rather than discovered from a
+        # rejection. The ask comes off the book and is on-grid by construction --
+        # this is the guard for when it is not.
+        constraints = crypto_markets.read_trading_constraints(market)
+        if not crypto_markets.price_on_tick(ask, constraints.tick_size):
+            snapped = crypto_markets.round_down_to_tick(ask, constraints.tick_size)
+            if snapped < cfg["min_probability"]:
+                return False, REASON_OFF_TICK, (
+                    f"ask {ask:.4f} is off the {constraints.tick_size} price grid and snapping "
+                    f"down gives {snapped:.4f}, below the floor"
+                ), 0.0
+            ask = snapped
+
+        fee_terms = crypto_markets.read_fee_terms(market)
+        net_edge = crypto_markets.net_edge_per_share(ask, fee_terms)
+        if net_edge < cfg["min_net_edge_per_share"]:
+            return False, REASON_NET_EDGE, (
+                f"net edge {net_edge:.4f}/share after a "
+                f"{fee_terms.taker_fee_per_share(ask):.4f} taker fee is below the "
+                f"{cfg['min_net_edge_per_share']:.4f} floor at submit time"
+            ), 0.0
+
         drift = ask - float(opp.confirmed_price)
         if cfg["max_slippage"] > 0 and drift > cfg["max_slippage"]:
             return False, REASON_SLIPPAGE, (
@@ -231,7 +256,10 @@ class CryptoStrategy:
                 f"over the {cfg['max_slippage']:.4f} cap"
             ), 0.0
 
-        return True, "", f"{remaining:.1f}s left, executable ask {ask:.4f}", float(ask)
+        return True, "", (
+            f"{remaining:.1f}s left, executable ask {ask:.4f}, net edge {net_edge:.4f}/share "
+            f"after fees"
+        ), float(ask)
 
     # --- execution --------------------------------------------------------
 
@@ -292,8 +320,14 @@ class CryptoStrategy:
         if not stakes:
             return 0
 
+        # For a MARKET order, hand the exchange its own price cap as well. Our
+        # pre-trade re-check can only see the book as it was a moment ago;
+        # max_price is what actually stops the order crossing further if the
+        # book moves between signing and matching.
         results = live.place_buy_selected(
-            str(opp.token_id), float(price), stakes, order_type=cfg["order_type"]
+            str(opp.token_id), float(price), stakes,
+            order_type=cfg["order_type"],
+            max_price=float(price) + max(cfg["max_slippage"], 0.0),
         )
         # "Entered" means an order reached the exchange -- a fill, or an order
         # left resting in the book. Both must keep the round's claim: a resting

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from polymarket import RateLimitError, PolymarketError
 
@@ -36,6 +36,7 @@ from crypto_markets import (
     REASON_BOOK_THIN,
     REASON_BOOK_WIDE_SPREAD,
     REASON_DUPLICATE_POSITION,
+    REASON_NET_EDGE,
     REASON_NO_BOOK,
     REASON_NOT_LIVE,
     REASON_PRICE_ABOVE_CEILING,
@@ -88,6 +89,11 @@ class CryptoOpportunity:
     best_bid: Optional[float] = None
     ask_size: float = 0.0
     duration_source: str = ""
+    # Fee economics, computed from the market's own published fee schedule.
+    taker_fee_per_share: float = 0.0
+    net_edge_per_share: float = 0.0
+    tick_size: Optional[float] = None
+    min_order_size: Optional[float] = None
     strategy: str = "crypto_5m"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -159,6 +165,7 @@ def crypto_settings(settings_override: Optional[Dict[str, Any]] = None) -> Dict[
         "max_quote_age_seconds": float(_get("crypto_max_quote_age_seconds")),
         "min_ask_depth_multiple": float(_get("crypto_min_ask_depth_multiple")),
         "require_two_sided_book": bool(_get("crypto_require_two_sided_book")),
+        "min_net_edge_per_share": float(_get("crypto_min_net_edge_per_share")),
         "round_duration_seconds": float(_get("crypto_round_duration_seconds")),
         "round_duration_tolerance_seconds": float(_get("crypto_round_duration_tolerance_seconds")),
         "discovery_lookahead_seconds": float(_get("crypto_discovery_lookahead_seconds")),
@@ -230,6 +237,46 @@ def evaluate_book(
             return None, REASON_BOOK_THIN, f"{ask_size:.2f} shares at the ask < {needed:.2f} needed", info
 
     return best_ask, "", "", info
+
+
+def fetch_order_books(
+    client: Any, token_ids: Sequence[str]
+) -> Tuple[Dict[str, Any], str]:
+    """Reads several order books in one CLOB request.
+
+    Polymarket exposes a batch endpoint (up to 500 books per request); using it
+    keeps every quote in a scan pass consistent with the others and costs one
+    round trip instead of N -- which matters when the whole entry window is 30
+    seconds. Falls back to individual reads if the batch call is unavailable, so
+    a batch-endpoint problem degrades rather than blocks trading.
+
+    Returns (books_by_token_id, error_detail).
+    """
+    if not token_ids:
+        return {}, ""
+
+    unique = list(dict.fromkeys(str(t) for t in token_ids))
+    try:
+        books = client.get_order_books(token_ids=unique)
+        by_token: Dict[str, Any] = {}
+        for requested, book in zip(unique, books or ()):
+            # Prefer the book's own token id; fall back to request order for
+            # doubles that do not echo it.
+            key = str(getattr(book, "token_id", "") or requested)
+            by_token[key] = book
+            by_token.setdefault(requested, book)
+        return by_token, ""
+    except (RateLimitError, PolymarketError, AttributeError, TypeError) as exc:
+        batch_error = f"{type(exc).__name__}: {exc}"
+
+    by_token = {}
+    last_error = batch_error
+    for token_id in unique:
+        try:
+            by_token[token_id] = client.get_order_book(token_id=token_id)
+        except (RateLimitError, PolymarketError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+    return by_token, ("" if by_token else last_error)
 
 
 def _list_candidate_markets(client: Any, cfg: Dict[str, Any], now: datetime) -> Iterable[Any]:
@@ -417,7 +464,18 @@ def _evaluate_round(
     floor = cfg["min_probability"]
     ceiling = cfg["max_probability"]
     stake = cfg["stake_per_trade"]
+    # Fees and the price grid are published per market; read them rather than
+    # assuming. Buying at the ask is a taker fill, so the taker fee always
+    # applies here -- makers are never charged, but a maker order is not what
+    # this strategy places.
+    fee_terms = crypto_markets.read_fee_terms(market)
+    constraints = crypto_markets.read_trading_constraints(market)
 
+    # Work out which sides are worth a book read, then fetch them in ONE request.
+    # Inside a 30-second window the round trips are the budget: sequential reads
+    # add latency and quote the two sides at different instants, which is exactly
+    # what the re-check is trying to avoid.
+    wanted: List[str] = []
     for side in (SIDE_UP, SIDE_DOWN):
         token_id = round_.side_tokens.get(side)
         if not token_id:
@@ -425,7 +483,6 @@ def _evaluate_round(
         if token_id in held_token_ids:
             _skip(REASON_DUPLICATE_POSITION, "this outcome token is already held", side=side)
             continue
-
         gamma_price = round_.side_prices.get(side)
         if gamma_price is not None and gamma_price < (floor - GAMMA_PREFILTER_MARGIN):
             # Far enough below the floor that no live book could close the gap;
@@ -437,11 +494,19 @@ def _evaluate_round(
                 side=side,
             )
             continue
+        wanted.append(token_id)
 
-        try:
-            order_book = client.get_order_book(token_id=token_id)
-        except (RateLimitError, PolymarketError) as exc:
-            _skip(REASON_NO_BOOK, f"order book unavailable ({type(exc).__name__}: {exc})", side=side)
+    books, books_error = fetch_order_books(client, wanted)
+
+    for side in (SIDE_UP, SIDE_DOWN):
+        token_id = round_.side_tokens.get(side)
+        if not token_id or token_id not in wanted:
+            continue
+        gamma_price = round_.side_prices.get(side)
+
+        order_book = books.get(token_id)
+        if order_book is None:
+            _skip(REASON_NO_BOOK, books_error or "order book unavailable", side=side)
             continue
 
         required_shares = (stake / gamma_price) if (gamma_price and gamma_price > 0) else (stake / max(floor, 1e-9))
@@ -473,6 +538,17 @@ def _evaluate_round(
             )
             continue
 
+        fee = fee_terms.taker_fee_per_share(ask)
+        net_edge = crypto_markets.net_edge_per_share(ask, fee_terms)
+        if net_edge < cfg["min_net_edge_per_share"]:
+            _skip(
+                REASON_NET_EDGE,
+                f"net edge {net_edge:.4f}/share after a {fee:.4f} taker fee is below the "
+                f"{cfg['min_net_edge_per_share']:.4f} floor",
+                side=side,
+            )
+            continue
+
         result.opportunities.append(CryptoOpportunity(
             market_id=round_.market_id,
             question=round_.question,
@@ -491,12 +567,17 @@ def _evaluate_round(
             best_bid=book_info.get("best_bid"),
             ask_size=float(book_info.get("ask_size") or 0.0),
             duration_source=round_.duration_source,
+            taker_fee_per_share=fee,
+            net_edge_per_share=net_edge,
+            tick_size=constraints.tick_size,
+            min_order_size=constraints.min_order_size,
         ))
         if log:
             log(
                 f"[crypto] SIGNAL {round_.asset} {side} {round_.slug or round_.market_id}: "
                 f"ask {ask:.4f} >= {floor:.2f}, {remaining:.1f}s left, "
-                f"{float(book_info.get('ask_size') or 0.0):.2f} shares at the ask",
+                f"{float(book_info.get('ask_size') or 0.0):.2f} shares at the ask, "
+                f"net edge {net_edge:.4f}/share after a {fee:.4f} taker fee",
                 f"{round_.round_key}:{side}:signal",
             )
 

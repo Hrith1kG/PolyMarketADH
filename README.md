@@ -114,7 +114,7 @@ Measured against the live Gamma API and CLOB, which is worth knowing before you 
 | `orderPriceMinTickSize` is **0.01** | The price ladder is whole cents, so a 0.90 floor sits exactly on a tick |
 | `orderMinSize` is **5 shares** | At a 0.95 ask that is a ~$4.75 minimum order |
 | Resting size at the best ask ranged from **~18 to ~1400 shares** across assets | The depth gate is the one that bites most often -- see below |
-| `feeType: crypto_fees_v2`, `feeSchedule.rate` **0.07**, taker-only | **These markets charge a taker fee; the sports markets this bot was built for do not.** At a 0.95 entry the fee is roughly `0.07 x min(p, 1-p)` ≈ 0.0035/share, about 7% of the $0.05 gross edge. Budget for it: the strategy does not model fees, because the SDK's market model does not surface the fee schedule. |
+| `feesEnabled: true`, `feeSchedule.rate` **0.07**, `exponent` 1, taker-only, `rebateRate` 0.2 | Crypto markets charge a **taker** fee. The strategy reads the schedule from each market and prices it in -- see below. |
 
 ### Where in the round an entry is actually possible
 
@@ -157,12 +157,78 @@ trade, raise it**; the cost is entering earlier, with more of the round still un
 `book_no_asks` skips in the log -- that reason dominating the final seconds is this effect, not a
 fault.
 
+### Fees are real and are priced in
+
+Polymarket's published formula is:
+
+```text
+fee = C x feeRate x p x (1 - p)
+```
+
+where `C` is shares and `p` the fill price, with the schedule's `exponent` applied to the price
+component. The fee is charged to the **taker** at match time, whichever way the round resolves;
+**makers are never charged**. Buying at the ask -- what this strategy does -- is always a taker fill.
+
+The crypto taker rate is **0.07**. Reproducing Polymarket's own fee table exactly:
+
+| Fill price | Taker fee / 100 shares | Gross edge / share | **Net edge / share** | Fee as % of edge |
+| --- | --- | --- | --- | --- |
+| 0.90 | $0.63 | $0.1000 | **$0.0937** | 6.3% |
+| 0.95 | $0.33 | $0.0500 | **$0.0467** | 6.6% |
+| 0.99 | $0.07 | $0.0100 | **$0.0093** | 6.9% |
+
+The strategy reads `market.trading.fee_schedule` at runtime rather than assuming a rate, logs the
+fee and the net edge on every signal and entry, and will refuse an entry whose net edge falls below
+`crypto_min_net_edge_per_share` (default 0.0, i.e. informational only).
+
+**Sports markets are not fee-free either** -- they carry a 0.05 taker rate. Only Geopolitics markets
+charge nothing. The sports strategy in this repo does not currently price fees in.
+
 **On the depth gate.** `crypto_min_ask_depth_multiple` (default 1.0) requires the best ask to hold
 enough resting size to fill your whole intended stake at the quoted price. With the default $25
 stake that is ~26 shares at 0.95, which several assets' books do not carry -- so expect
 `book_depth_insufficient` skips. That is the gate doing its job (it refuses a price you could not
 actually be filled at), not a bug. If you see it constantly, lower `crypto_stake_per_trade` rather
 than loosening the gate.
+
+### API usage and SDK conformance
+
+Audited against the official documentation at <https://docs.polymarket.com> (SDK version pinned in
+`requirements.txt`; 0.10.0 at time of audit):
+
+* **Everything goes through the unified `polymarket-client` SDK.** `crypto_markets.py`,
+  `crypto_scanner.py` and `crypto_strategy.py` import no HTTP client at all -- no `requests`, no
+  `httpx`, no `urllib`. The SDK talks to Gamma (`gamma-api.polymarket.com`) for discovery and to the
+  CLOB (`clob.polymarket.com`) for books and orders, so the CLOB **is** used, but only through the
+  SDK's typed methods. Nothing here uses the retired `py-clob-client`.
+* **Order books are read in one batch request per round** via `get_order_books()` (the CLOB `/books`
+  endpoint, max 500 per call), falling back to individual reads if the batch call is unavailable.
+  Inside a 30-second window the round trips are the budget, and batching also quotes both sides of a
+  round at the same instant.
+* **Bid/ask ordering is per the docs**: "bids are ordered by ascending price and asks by descending
+  price, so the best bid and ask are the last entries". Confirmed on live books -- on a
+  complementary pair, Up ask 0.48 + Down bid 0.52 = 1.00 exactly.
+* **Tick size and minimum order size are read from the market**, never assumed, as the docs
+  instruct. A buy price off the grid is snapped *down* (never up, which would pay more) and refused
+  if that drops it below the probability floor.
+* **Market orders carry `max_price`.** The docs name this as the exchange-side slippage control
+  ("maxPrice prevents a BUY from crossing a higher price"); without it a market buy takes whatever
+  the book offers. The crypto path passes `quote + crypto_max_slippage`.
+* **Rate limits are not a constraint here.** Gamma `/markets` allows 300 req/10s and the CLOB
+  `/book` 1500 req/10s; a 3-second cadence issues roughly one listing call plus one batch book call
+  per poll.
+
+Two things the docs offer that this implementation deliberately does **not** use yet, both noted
+rather than silently adopted:
+
+* **WebSocket market data** (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) would remove
+  polling latency entirely, but realtime subscriptions are async-only (`AsyncPublicClient`) and this
+  bot is synchronous throughout. Polling is well inside the rate limits.
+* **Chainlink TWAP feeds.** These rounds resolve on a Chainlink 60-second TWAP
+  (`cryptoMarketConfig: {id: "btc-5m-twap-60", twapLookbackSeconds: 60}`), and Polymarket relays
+  those feeds over RTDS without credentials. Reading the TWAP directly would tell you the likely
+  outcome ahead of the book. That is a different strategy from the one specified here, so it is
+  flagged, not built.
 
 ### Settings
 
@@ -182,6 +248,8 @@ Configured from the dashboard's **Crypto 5m** sidebar tab, or directly in `setti
 | `crypto_max_open_positions` / `crypto_max_total_exposure` / `crypto_max_trades_per_day` | `5` / `100.0` / `20` | Crypto-only risk budget |
 | `crypto_max_slippage` | `0.01` | Refuses an entry whose ask ran away from the quote |
 | `crypto_max_spread` / `crypto_max_quote_age_seconds` / `crypto_min_ask_depth_multiple` | `0.05` / `20.0` / `1.0` | Order-book health for the side bought |
+| `crypto_require_two_sided_book` | `true` | Require a resting bid as well as an offer. Near round end the favourite's book goes offer-only; set false to trade it anyway |
+| `crypto_min_net_edge_per_share` | `0.0` | Minimum profit per share **after** the taker fee. 0.0 logs the fee without blocking |
 | `crypto_round_duration_seconds` / `crypto_round_duration_tolerance_seconds` | `300` / `20` | The round shape that defines "a 5-minute market" |
 | `crypto_discovery_lookahead_seconds` | `420` | How far past the window to look for upcoming rounds |
 | `crypto_discovery_tag_id` | `null` | Optional Gamma tag id to narrow discovery |

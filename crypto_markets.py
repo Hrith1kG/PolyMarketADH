@@ -43,6 +43,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 # --- Reject reasons -------------------------------------------------------
@@ -75,6 +76,8 @@ REASON_ALREADY_TRADED = "already_traded_this_round"
 REASON_DUPLICATE_POSITION = "duplicate_position"
 REASON_RISK_BLOCKED = "risk_limit"
 REASON_SLIPPAGE = "slippage"
+REASON_NET_EDGE = "net_edge_below_floor"
+REASON_OFF_TICK = "price_off_tick"
 
 SIDE_UP = "UP"
 SIDE_DOWN = "DOWN"
@@ -364,6 +367,110 @@ def _resolve_schedule(
         "slug is not in the canonical {asset}-updown-{duration}-{startEpoch} form "
         "and carries no explicit 5-minute marker",
     )
+
+
+# --- Trading constraints and fees -------------------------------------------
+# Both are modelled fields on Market.trading, so they are read from the market
+# itself rather than assumed. Per the docs: "Always read the active value from
+# the market rather than assuming a fixed increment."
+
+
+@dataclass(frozen=True)
+class FeeTerms:
+    """A market's taker fee schedule, as published on the market."""
+
+    enabled: bool = False
+    rate: float = 0.0
+    exponent: float = 1.0
+    taker_only: bool = True
+    rebate_rate: float = 0.0
+
+    def taker_fee_per_share(self, price: float) -> float:
+        """USDC charged per share to the taker at `price`.
+
+        Polymarket's published formula is `fee = C x feeRate x p x (1 - p)`,
+        with the schedule's exponent applied to the price component. The fee is
+        symmetric about 0.50, so a fill at 0.95 costs the same as one at 0.05.
+        Makers are never charged.
+        """
+        if not self.enabled or self.rate <= 0:
+            return 0.0
+        p = max(0.0, min(1.0, float(price)))
+        component = p * (1.0 - p)
+        try:
+            component = component ** float(self.exponent)
+        except (ValueError, OverflowError):
+            return 0.0
+        return float(self.rate) * component
+
+
+@dataclass(frozen=True)
+class TradingConstraints:
+    """The market's own price grid and minimum order size."""
+
+    tick_size: Optional[float] = None
+    min_order_size: Optional[float] = None
+
+
+def read_fee_terms(market: Any) -> FeeTerms:
+    trading = getattr(market, "trading", None)
+    schedule = getattr(trading, "fee_schedule", None) if trading else None
+    enabled = bool(getattr(trading, "fees_enabled", False)) if trading else False
+    if schedule is None:
+        return FeeTerms(enabled=False)
+    return FeeTerms(
+        enabled=enabled,
+        rate=float(getattr(schedule, "rate", 0.0) or 0.0),
+        exponent=float(getattr(schedule, "exponent", 1.0) or 1.0),
+        taker_only=bool(getattr(schedule, "taker_only", True)),
+        rebate_rate=float(getattr(schedule, "rebate_rate", 0.0) or 0.0),
+    )
+
+
+def read_trading_constraints(market: Any) -> TradingConstraints:
+    trading = getattr(market, "trading", None)
+    if trading is None:
+        return TradingConstraints()
+    tick = getattr(trading, "minimum_tick_size", None)
+    size = getattr(trading, "minimum_order_size", None)
+    return TradingConstraints(
+        tick_size=float(tick) if tick is not None else None,
+        min_order_size=float(size) if size is not None else None,
+    )
+
+
+def net_edge_per_share(price: float, fee_terms: FeeTerms) -> float:
+    """What one share actually returns if this side wins, after the taker fee.
+
+    Buying at `price` pays out 1.00 on a win, so the gross edge is (1 - price);
+    the taker fee is charged at match time whichever way the round resolves.
+    """
+    return (1.0 - float(price)) - fee_terms.taker_fee_per_share(price)
+
+
+def price_on_tick(price: float, tick_size: Optional[float]) -> bool:
+    """Whether `price` sits on the market's price grid.
+
+    An order priced off the grid is rejected by the exchange, so this is checked
+    before submitting rather than discovered from a rejection.
+    """
+    if not tick_size or tick_size <= 0:
+        return True
+    steps = float(price) / float(tick_size)
+    return abs(steps - round(steps)) < 1e-6
+
+
+def round_down_to_tick(price: float, tick_size: Optional[float]) -> float:
+    """Snaps a buy price DOWN to the grid -- never up, which would pay more.
+
+    Uses Decimal for the arithmetic: binary floats turn 0.957 on a 0.01 grid
+    into 0.9500000000000001, which is off-grid and would be rejected.
+    """
+    if not tick_size or tick_size <= 0:
+        return float(price)
+    tick = Decimal(str(tick_size))
+    steps = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_FLOOR)
+    return float(steps * tick)
 
 
 def is_market_live(market: Any) -> Tuple[bool, str]:

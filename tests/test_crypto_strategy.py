@@ -292,9 +292,11 @@ class FakeLiveBroker:
     def get_session(self, name):
         return FakeSession(name)
 
-    def place_buy_selected(self, token_id, price, account_stakes, order_type="LIMIT"):
+    def place_buy_selected(self, token_id, price, account_stakes, order_type="LIMIT",
+                           max_price=None):
         self.orders.append({"token_id": token_id, "price": price,
-                            "stakes": dict(account_stakes), "order_type": order_type})
+                            "stakes": dict(account_stakes), "order_type": order_type,
+                            "max_price": max_price})
         results = []
         for name, stake in account_stakes.items():
             if self.outcome == "filled":
@@ -342,8 +344,11 @@ def live_run(outcome, asset, market_id, tokens):
 
 broker, live, result = live_run("filled", "btc", "1200", ("L1-up", "L1-down"))
 assert result.entries == 1, result
-assert live.orders == [{"token_id": "L1-up", "price": 0.95,
-                        "stakes": {"Acc A": 10.0}, "order_type": "LIMIT"}], live.orders
+# The exchange-side price cap documented for market orders is passed through:
+# our own re-check only sees the book as it was a moment ago.
+assert live.orders == [{"token_id": "L1-up", "price": 0.95, "stakes": {"Acc A": 10.0},
+                        "order_type": "LIMIT",
+                        "max_price": 0.95 + settings_manager.DEFAULT_SETTINGS["crypto_max_slippage"]}], live.orders
 pos = list(broker.crypto_positions().values())[0]
 assert pos["mode"] == "LIVE" and pos["account_name"] == "Acc A"
 assert abs(pos["shares"] - 9.0) < 1e-9, pos["shares"]   # sized from the fill, not the request

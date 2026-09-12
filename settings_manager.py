@@ -123,6 +123,14 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # gates above still apply to it either way. Leave True unless the logs show
     # book_no_bids costing you every entry.
     "crypto_require_two_sided_book": True,
+    # Fees. Polymarket charges the TAKER a fee of C x rate x p x (1-p) on these
+    # markets (crypto rate 0.07), read at runtime from each market's own
+    # fee_schedule rather than assumed. Buying at the ask is always a taker
+    # fill. This floor is the minimum profit per share, AFTER that fee, that an
+    # entry must still be worth -- 0.0 keeps the fee informational (it is always
+    # logged) without blocking anything. At 0.99 the net edge is ~0.0093/share,
+    # at 0.95 ~0.0467, at 0.90 ~0.0937.
+    "crypto_min_net_edge_per_share": 0.0,
     # Round shape. These markets are fixed 5-minute rounds; a market whose
     # measured duration is outside this band is not one of them and is skipped.
     "crypto_round_duration_seconds": 300,

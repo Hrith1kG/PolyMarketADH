@@ -284,19 +284,32 @@ class AccountSession:
             print(f"[live_broker][{self.name}] Could not read book for {token_id}: {exc}")
         return info
 
-    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None, order_type: str = "LIMIT") -> Dict[str, Any]:
+    def place_buy(self, token_id: str, price: float, stake_usd: Optional[float] = None,
+                  order_type: str = "LIMIT", max_price: Optional[float] = None) -> Dict[str, Any]:
         """Places a buy order sized to `stake_usd` at `price` and returns the interpreted
-        fill outcome (see interpret_order_response). Never reports a fill it didn't get."""
+        fill outcome (see interpret_order_response). Never reports a fill it didn't get.
+
+        `max_price` caps how far a MARKET order may cross the book, which is the
+        exchange-side slippage control Polymarket documents for market orders
+        ("maxPrice prevents a BUY from crossing a higher price"). Without it a
+        market buy will take whatever the book offers, however thin. It defaults
+        to None so existing callers keep their current behaviour exactly; the
+        crypto strategy passes its own cap. It has no effect on LIMIT orders,
+        whose price is already the cap.
+        """
         stake = stake_usd if stake_usd is not None else settings_manager.get_account_stake(self.name, fallback=self.custom_stake or config.STAKE_PER_TRADE)
         
         if order_type.upper() == "MARKET":
             try:
-                # Market order uses 'amount' as the USDC spend target
-                response = self.client.place_market_order(
-                    token_id=token_id,
-                    side="BUY",
-                    amount=float(stake),
-                )
+                # Market order uses 'amount' as the USDC spend target.
+                market_kwargs: Dict[str, Any] = {
+                    "token_id": token_id,
+                    "side": "BUY",
+                    "amount": float(stake),
+                }
+                if max_price is not None:
+                    market_kwargs["max_price"] = float(max_price)
+                response = self.client.place_market_order(**market_kwargs)
             except Exception as exc:
                 raise LiveBrokerError(f"[{self.name}] Failed to place market order: {exc}")
             
@@ -630,7 +643,8 @@ class LiveBroker:
                 results.append({"account": sess.name, "success": False, "error": str(exc)})
         return results
 
-    def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float], order_type: str = "LIMIT") -> List[Dict[str, Any]]:
+    def place_buy_selected(self, token_id: str, price: float, account_stakes: Dict[str, float],
+                           order_type: str = "LIMIT", max_price: Optional[float] = None) -> List[Dict[str, Any]]:
         """Concurrently dispatches buy orders for only the given subset of accounts
         (name -> stake). Used so accounts can independently opt in/out of an opportunity
         (per their own pause/kill-switch/filters/limits) while still firing in parallel
@@ -643,7 +657,8 @@ class LiveBroker:
 
         def _execute_session(name: str, session: AccountSession, stake: float):
             try:
-                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake, order_type=order_type)
+                outcome = session.place_buy(token_id=token_id, price=price, stake_usd=stake,
+                                            order_type=order_type, max_price=max_price)
                 return _buy_result(session, stake, outcome=outcome)
             except Exception as exc:
                 return _buy_result(session, stake, error=str(exc))
