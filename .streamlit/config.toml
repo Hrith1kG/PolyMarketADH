@@ -1,6 +1,27 @@
 [theme]
+base = "dark"
 primaryColor = "#4C8DE8"
 backgroundColor = "#0A0D12"
 secondaryBackgroundColor = "#0F1420"
 textColor = "#E7ECF3"
+borderColor = "#1E2733"
+
 font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#0D1118"
+secondaryBackgroundColor = "#111826"
+textColor = "#E7ECF3"
+borderColor = "#1E2733"
+
+[client]
+showErrorDetails = true
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+
