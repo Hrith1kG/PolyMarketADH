@@ -787,6 +787,17 @@ with st.sidebar:
 
         with sb_tab_risk:
             st.markdown("**Probability & Odds**")
+            # There is one entry band. While Late Game is on it lives in the Gates tab
+            # and these two are read by nothing, so say so and disable them rather than
+            # leaving controls that look live and change nothing.
+            band_is_late_game = bool(settings.get("late_game_enabled", False))
+            if band_is_late_game:
+                lg_low, lg_high = settings_manager.effective_price_band(settings)
+                st.caption(
+                    f"Late Game is on, so the entry band is Min/Max Entry Probability "
+                    f"on the **Gates** tab - currently **{lg_low:.3f} - {lg_high:.3f}**. "
+                    f"The two sliders below do not apply in this mode."
+                )
             price_min = st.slider(
                 "Min Price (Entry Floor)",
                 min_value=0.85,
@@ -794,6 +805,9 @@ with st.sidebar:
                 value=float(settings.get("price_min", 0.97)),
                 step=0.005,
                 format="%.3f",
+                disabled=band_is_late_game,
+                help="Used by the standard scan. While Late Game is on, the band comes "
+                     "from Min/Max Entry Probability on the Gates tab instead.",
             )
             price_max = st.slider(
                 "Max Price (Entry Ceiling)",
@@ -802,6 +816,7 @@ with st.sidebar:
                 value=float(settings.get("price_max", 0.995)),
                 step=0.001,
                 format="%.3f",
+                disabled=band_is_late_game,
             )
             min_volume = st.number_input(
                 "Min 24h Volume ($)",
@@ -937,8 +952,8 @@ tab_overview, tab_control, tab_history, tab_collab = st.tabs([
 
 
 def build_gates_data():
-    p_floor = float(settings.get("price_min", 0.97)) * 100
-    p_ceil = float(settings.get("price_max", 0.995)) * 100
+    band_low, band_high = settings_manager.effective_price_band(settings)
+    p_floor, p_ceil = band_low * 100, band_high * 100
     daily_limit = int(settings.get("max_trades_per_day", 10))
     exposure_limit = float(settings.get("max_total_exposure", 200.0))
     cooldown = int(settings.get("poll_interval_seconds", 60))
@@ -947,11 +962,6 @@ def build_gates_data():
     min_hours = float(settings.get("min_hours_to_resolution", 1.0))
     late_minutes = float(settings.get("late_game_max_remaining_minutes", 30.0))
     late_fraction = float(settings.get("late_game_max_remaining_fraction", 0.34))
-    # With Late Game on the entry band is its own; price_min/price_max do not apply,
-    # so showing them here would misreport what is actually being enforced.
-    if late_game_on:
-        p_floor = float(settings.get("late_game_min_probability", 0.90)) * 100
-        p_ceil = float(settings.get("late_game_max_probability", 0.99)) * 100
     return [
         {"Rule": "Probability Floor Threshold", "Value": f"= {p_floor:.2f}%", "Status": "ENFORCED"},
         {"Rule": "Probability Ceiling Threshold", "Value": f"= {p_ceil:.2f}%", "Status": "ENFORCED"},
@@ -1483,7 +1493,8 @@ with tab_control:
     with col_limits:
         st.markdown("##### Strategy and Limits")
         limits_data = [
-            {"Setting": "Min Price (Entry Floor)", "Value": f"{float(settings.get('price_min', 0.97)):.3f}"},
+            {"Setting": "Entry Price Band",
+             "Value": "{:.3f} - {:.3f}".format(*settings_manager.effective_price_band(settings))},
             {"Setting": "Min 24h Volume", "Value": f"${float(settings.get('min_volume', 5000.0)):,.0f}"},
             {"Setting": "Max Open Positions", "Value": str(int(settings.get("max_open_positions", 10)))},
             {"Setting": "Max Trades / Day", "Value": str(int(settings.get("max_trades_per_day", 10)))},
@@ -1688,10 +1699,19 @@ ACCOUNT_1_STAKE=25.0
                         pac_max_exp = st.number_input("Max Total Exposure ($)", min_value=1.0, value=float(pac_settings.get("max_total_exposure") or 200.0), key=f"pac_maxexp_{pac_acc}")
                         pac_max_trades = st.number_input("Max Trades / Day", min_value=1, max_value=500, value=int(pac_settings.get("max_trades_per_day") or 10), key=f"pac_maxtrades_{pac_acc}")
                     with pac_col2:
+                        # get_account_settings already resolves an un-overridden band
+                        # to whatever is in force, so this seeds to the global band and
+                        # only narrows it where the account has chosen to.
+                        pac_band_low, pac_band_high = settings_manager.effective_price_band(settings)
                         pac_price_min, pac_price_max = st.slider(
                             "Price Band", min_value=0.5, max_value=1.0,
-                            value=(float(pac_settings.get("price_min") or 0.97), float(pac_settings.get("price_max") or 0.995)),
+                            value=(float(pac_settings.get("price_min") or pac_band_low),
+                                   float(pac_settings.get("price_max") or pac_band_high)),
                             step=0.001, format="%.3f", key=f"pac_price_{pac_acc}",
+                            help=f"Narrows this account within the global band "
+                                 f"({pac_band_low:.3f}-{pac_band_high:.3f}). A value outside "
+                                 f"that range has no effect - the scan never offers "
+                                 f"prices beyond it.",
                         )
                         pac_min_vol = st.number_input("Min Volume ($)", min_value=0.0, value=float(pac_settings.get("min_volume") if pac_settings.get("min_volume") is not None else 5000.0), key=f"pac_minvol_{pac_acc}")
                         pac_min_liq = st.number_input("Min Liquidity ($)", min_value=0.0, value=float(pac_settings.get("min_liquidity") if pac_settings.get("min_liquidity") is not None else 1000.0), key=f"pac_minliq_{pac_acc}")

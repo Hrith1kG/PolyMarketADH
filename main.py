@@ -16,8 +16,9 @@ def log(msg: str):
 def _broad_scan_settings(global_settings, accounts):
     """Union of thresholds across the global settings and every enabled account's own
     filters, so a single market scan covers what every independent account might want."""
-    price_min = global_settings.get("price_min", 0.97)
-    price_max = global_settings.get("price_max", 0.995)
+    # Widen the band that is actually in force -- with Late Game on that is the Late
+    # Game probability band, not price_min/price_max.
+    price_min, price_max = settings_manager.effective_price_band(global_settings)
     min_volume = global_settings.get("min_volume", 5000.0)
     min_liquidity = global_settings.get("min_liquidity", 1000.0)
     sports_types = set(global_settings.get("sports_market_types", ["moneyline"]) or [])
@@ -30,10 +31,8 @@ def _broad_scan_settings(global_settings, accounts):
         min_liquidity = min(min_liquidity, acc_settings.get("min_liquidity") if acc_settings.get("min_liquidity") is not None else min_liquidity)
         sports_types.update(acc_settings.get("sports_market_types") or [])
 
-    broad = dict(global_settings)
+    broad = settings_manager.with_price_band(global_settings, price_min, price_max)
     broad.update({
-        "price_min": price_min,
-        "price_max": price_max,
         "min_volume": min_volume,
         "min_liquidity": min_liquidity,
         "sports_market_types": list(sports_types) or ["moneyline"],
@@ -64,21 +63,36 @@ def _slippage_ok(live, opp, max_slippage: float) -> Tuple[bool, str]:
     return True, ""
 
 
-def _opportunity_matches_account(opp, acc_settings) -> bool:
+def _opportunity_matches_account(opp, acc_settings) -> Tuple[bool, str]:
+    """Does this account's own filter accept the opportunity, and if not, why not?
+
+    Returns a reason rather than a bare False: an account narrower than the scan is a
+    perfectly normal reason to pass on a signal, but silently discarding one here --
+    after the scanner has already reported it as qualifying -- is indistinguishable
+    from a broken scan when you are looking at why nothing traded.
+
+    `acc_settings` comes from settings_manager.get_account_settings, whose price_min /
+    price_max are the band in force for this mode, so an account with no band of its
+    own is a genuine no-op here.
+    """
     price_min = acc_settings.get("price_min")
     price_max = acc_settings.get("price_max")
     if price_min is not None and price_max is not None and not (price_min <= opp.confirmed_price <= price_max):
-        return False
+        return False, (f"price {opp.confirmed_price:.3f} outside this account's band "
+                       f"{price_min:.3f}-{price_max:.3f}")
     min_volume = acc_settings.get("min_volume")
     if min_volume is not None and opp.volume < min_volume:
-        return False
+        return False, (f"volume {opp.volume:,.0f} below this account's minimum "
+                       f"{min_volume:,.0f}")
     min_liquidity = acc_settings.get("min_liquidity")
     if min_liquidity is not None and opp.liquidity < min_liquidity:
-        return False
+        return False, (f"liquidity {opp.liquidity:,.0f} below this account's minimum "
+                       f"{min_liquidity:,.0f}")
     sports_types = acc_settings.get("sports_market_types")
     if sports_types and opp.market_type not in sports_types:
-        return False
-    return True
+        return False, (f"market type {opp.market_type!r} not in this account's "
+                       f"{list(sports_types)}")
+    return True, ""
 
 
 def run():
@@ -180,7 +194,10 @@ def run():
                                     continue
                                 if acc_settings.get("entry_kill_switch", False):
                                     continue
-                                if not _opportunity_matches_account(opp, acc_settings):
+                                matches, why_not = _opportunity_matches_account(opp, acc_settings)
+                                if not matches:
+                                    log(f"SKIP      [{acc_name}] {opp.question[:40]!r} "
+                                        f"[{opp.outcome_label}] -- {why_not}")
                                     continue
 
                                 acc_held_tokens = {str(p.get("token_id")) for p in broker.positions_for_account(acc_name).values()}

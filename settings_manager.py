@@ -79,6 +79,40 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 RETIRED_SETTINGS = ("require_authoritative_time", "late_game_threshold_seconds")
 
 
+
+# --- The entry price band -----------------------------------------------------
+#
+# There is one price band, and which keys hold it depends on the mode. Late Game
+# reads late_game_min/max_probability; the standard scan reads price_min/price_max.
+# Everything that filters on entry price MUST resolve it through these helpers --
+# reading price_min directly is how the per-account filter ended up silently
+# discarding Late Game signals that the scanner had already accepted.
+
+def effective_price_band(settings: Dict[str, Any]) -> tuple:
+    """The (min, max) entry price band actually in force for these settings."""
+    if settings.get("late_game_enabled", False):
+        return (float(settings.get("late_game_min_probability", 0.90)),
+                float(settings.get("late_game_max_probability", 0.99)))
+    return (float(settings.get("price_min", 0.97)),
+            float(settings.get("price_max", 0.995)))
+
+
+def price_band_keys(settings: Dict[str, Any]) -> tuple:
+    """The two setting keys holding the band in force, for writing it back."""
+    if settings.get("late_game_enabled", False):
+        return ("late_game_min_probability", "late_game_max_probability")
+    return ("price_min", "price_max")
+
+
+def with_price_band(settings: Dict[str, Any], low: float, high: float) -> Dict[str, Any]:
+    """Copy of `settings` with the in-force band replaced by (low, high)."""
+    low_key, high_key = price_band_keys(settings)
+    updated = dict(settings)
+    updated[low_key] = float(low)
+    updated[high_key] = float(high)
+    return updated
+
+
 def load_settings() -> Dict[str, Any]:
     """Loads current settings from JSON, filling in any missing defaults."""
     settings = dict(DEFAULT_SETTINGS)
@@ -166,6 +200,11 @@ def get_account_settings(account_name: str) -> Dict[str, Any]:
     kill-switched, risk-capped, and strategy-filtered."""
     settings = load_settings()
     effective = {k: settings.get(k) for k in ACCOUNT_OVERRIDABLE_KEYS}
+    # An account that has not set its own band must inherit the band actually in
+    # force, not the raw price_min/price_max. Inheriting those meant that with Late
+    # Game on, every signal inside the Late Game band was silently dropped by the
+    # per-account filter for failing a price_min the mode does not even use.
+    effective["price_min"], effective["price_max"] = effective_price_band(settings)
     overrides = settings.get("account_overrides", {}).get(account_name, {})
     for key, value in overrides.items():
         if key in ACCOUNT_OVERRIDABLE_KEYS and value is not None:

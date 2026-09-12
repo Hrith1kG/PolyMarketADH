@@ -240,6 +240,12 @@ open positions is destroyed, orphaning them.
   nothing. `grep` finds it only in `settings_manager.py` and the two dashboard lines
   that render the input.
 - `require_high_confidence` — written by `dashboard.py:778`, never read by `scanner.py`.
+- `price_min` / `price_max` — read by nothing while Late Game is enabled, yet still
+  rendered as live sliders, *and* inherited by the per-account filter, which then
+  silently discarded signals the scanner had accepted. *Resolved.* One band is now
+  resolved through `settings_manager.effective_price_band()` by every consumer, an
+  account without its own band is a true no-op, per-account rejections are logged,
+  and the sliders are disabled and labelled when they do not apply.
 - `min_hours_to_resolution` — silently forced to `0.0` whenever Late Game is enabled
   (`scanner.py:136`), while the Circuit Breakers table still reports it as ENFORCED.
   *Resolved.* Late Game now runs its own scan over authoritatively live events and

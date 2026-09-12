@@ -238,9 +238,30 @@ Per-sport overrides are keyed by sport code and may set `enabled`,
 }
 ```
 
-While Late Game is enabled, `late_game_min_probability` / `late_game_max_probability`
-replace `price_min` / `price_max` as the entry band, so a 0.90–0.92 band means exactly
-that and nothing silently overrides it.
+## The entry price band
+
+There is **one** entry band, and the mode decides which keys hold it:
+
+| Mode | Band comes from | Dashboard location |
+|---|---|---|
+| Late Game on | `late_game_min_probability` / `late_game_max_probability` | Sidebar → Gates |
+| Late Game off | `price_min` / `price_max` | Sidebar → Risk |
+
+Everything that filters on entry price resolves it through
+`settings_manager.effective_price_band(settings)` — the scanner, the per-account
+filter in `main.py`, the broad multi-account scan, and every dashboard readout.
+Reading `price_min` directly is what previously let the per-account filter silently
+discard Late Game signals the scanner had already accepted: on shipped defaults
+(`price_min` 0.97 against a 0.90–0.99 Late Game band) that dropped every signal with
+no log line.
+
+An account that has not set its own band inherits the band in force, making the
+per-account filter a genuine no-op. An account that *has* set one narrows within the
+global band — a bound outside it has no effect, since the scan never offers prices
+beyond it. Every per-account rejection is logged with its reason.
+
+While Late Game is enabled the Risk tab's Min/Max Price sliders are disabled and
+labelled, rather than left looking live while changing nothing.
 
 ## Separation of concerns
 

@@ -216,10 +216,10 @@ def _scan_live_events(
     require_high_confidence = bool(settings.get("require_high_confidence", False))
     reference_stake = float(settings.get("stake_per_trade", 25.0) or 0.0)
 
-    # With Late Game on, this band is the entry rule -- price_min/price_max do not
-    # also apply, so a configured 0.90-0.92 band means exactly 0.90-0.92.
-    prob_min = float(settings.get("late_game_min_probability", 0.90))
-    prob_max = float(settings.get("late_game_max_probability", 0.99))
+    # One band, resolved in one place. With Late Game on it comes from the Late Game
+    # probability settings and price_min/price_max do not apply at all, so a
+    # configured 0.90-0.92 band means exactly 0.90-0.92.
+    prob_min, prob_max = settings_manager.effective_price_band(settings)
 
     query: Dict[str, Any] = {"live": True, "closed": False, "page_size": page_size}
     if only_sports and sports_tag:
@@ -345,8 +345,7 @@ def _scan_markets(
     """Standard scan: every open market in the resolution window, Late Game off."""
     opportunities: List[Opportunity] = []
 
-    price_min = float(settings.get("price_min", 0.97))
-    price_max = float(settings.get("price_max", 0.995))
+    price_min, price_max = settings_manager.effective_price_band(settings)
     min_volume = float(settings.get("min_volume", 5000.0))
     min_liquidity = float(settings.get("min_liquidity", 1000.0))
     min_hours = float(settings.get("min_hours_to_resolution", 1.0))
