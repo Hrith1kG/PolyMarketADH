@@ -703,6 +703,7 @@ class LiveBroker:
                 on_chain_trades_paginator = session.client.list_trades(user=session.wallet, page_size=100)
                 sell_trades_by_token: Dict[str, Any] = {}
                 bought_token_ids = set()
+                buy_trades_by_token = {}
                 for tr in on_chain_trades_paginator.iter_items():
                     tok = str(tr.asset_id or "")
                     if not tok:
@@ -713,6 +714,8 @@ class LiveBroker:
                             sell_trades_by_token[tok] = tr
                     elif side == "BUY":
                         bought_token_ids.add(tok)
+                        if tok not in buy_trades_by_token:
+                            buy_trades_by_token[tok] = tr
 
                 # 3. Find pending live trades in SQLite for this account/wallet
                 db_trades = database.get_all_trades(broker_filter="live", limit=500)
@@ -721,6 +724,67 @@ class LiveBroker:
                     if str(t.get("result", "")).upper() == "PENDING"
                     and (not t.get("account_name") or t.get("account_name") == session.name or t.get("wallet_address") == session.wallet)
                 ]
+                pending_token_ids = {str(pt.get("token_id", "")) for pt in pending if pt.get("token_id")}
+
+                # 3a. Import untracked on-chain positions (e.g. from resting orders that filled)
+                for on_pos in on_chain_pos:
+                    tok = str(on_pos.get("token_id", ""))
+                    if not tok or tok in pending_token_ids:
+                        continue
+                    
+                    size_held = float(on_pos.get("size", 0.0))
+                    if size_held > 0.01:
+                        entry_price = float(on_pos.get("avg_price", 0.0))
+                        if entry_price <= 0.0:
+                            mb = buy_trades_by_token.get(tok)
+                            if mb:
+                                entry_price = float(getattr(mb, "price", 0.5))
+                            else:
+                                entry_price = 0.5
+
+                        class ReconciledOpp:
+                            def __init__(self, p):
+                                self.token_id = p["token_id"]
+                                self.market_id = ""
+                                self.question = p["title"]
+                                self.outcome_label = p["outcome"]
+                                self.confirmed_price = entry_price
+                                self.end_date = None
+                                self.slug = ""
+                                self.market_type = "moneyline"
+                                self.game_start_time = None
+                                self.event_id = p.get("event_id", "")
+                        
+                        opp = ReconciledOpp(on_pos)
+                        broker_inst.open_position(
+                            opp,
+                            stake=size_held * entry_price,
+                            mode="LIVE",
+                            account_name=session.name,
+                            wallet_address=session.wallet,
+                            filled_size=size_held,
+                            fill_price=entry_price,
+                            force=True
+                        )
+                        pending_token_ids.add(tok)
+                        
+                        # Fetch the newly inserted trade so it can be reconciled below if needed
+                        new_db_trades = database.get_all_trades(broker_filter="live", limit=1)
+                        if new_db_trades and new_db_trades[0].get("token_id") == tok:
+                            pending.append(new_db_trades[0])
+                            
+                        # Report back to the UI that we synced an import
+                        reconciled.append({
+                            "trade_id": opp.token_id,
+                            "account": session.name,
+                            "question": opp.question,
+                            "outcome": opp.outcome_label,
+                            "exit_price": 0.0,
+                            "pnl": 0.0,
+                            "voided": False,
+                            "note": "Imported untracked on-chain position",
+                        })
+                        print(f"[live_broker] Imported untracked on-chain position for {session.name}: {tok}")
 
                 for pt in pending:
                     tok = str(pt.get("token_id", ""))
