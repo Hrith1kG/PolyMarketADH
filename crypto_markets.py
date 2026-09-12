@@ -20,10 +20,20 @@ Why a dedicated module instead of extending scanner.py:
 Identification uses structural metadata rather than loose title matching:
 
 * the two tradable outcomes must be labelled exactly "Up" and "Down";
-* the asset must appear as a whole hyphen-separated segment of the market /
-  event / series slug (falling back to a word-boundary match on the question);
-* the round length must be verifiable as five minutes, either from the
-  start/end timestamps or from an explicit 5-minute marker in the slug.
+* the asset and the round length come from the canonical slug, which Polymarket
+  emits in the machine-readable form `{asset}-updown-{duration}-{startEpoch}`
+  (e.g. `btc-updown-5m-1789214400`);
+* that slug is cross-checked against the round-end timestamp: the API's end date
+  must equal the slug's start epoch plus the slug's stated duration.
+
+DO NOT use `market.state.start_date` to measure one of these rounds. On the live
+API it is the *listing* time, roughly 24 hours before the round it belongs to --
+`btc-updown-5m-1789214400` is published with startDate 2026-09-11T12:09:37Z and
+endDate 2026-09-12T12:05:00Z. Measuring end minus start there yields ~86,000
+seconds and would reject every genuine 5-minute round. The round's true start is
+the epoch in the slug (Gamma also carries it as `eventStartTime`, but the SDK's
+Market model does not surface that field). This is the single most important
+invariant in this module; the cross-check above is what enforces it.
 
 Anything that fails one of those is rejected with a machine-readable reason so
 the caller can log exactly why a market was passed over.
@@ -108,6 +118,48 @@ _MINUTE_WORDS = frozenset({"m", "min", "mins", "minute", "minutes"})
 
 _SLUG_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
+# Polymarket's canonical slug for these rounds: asset, round length and the
+# round's start epoch, e.g. "btc-updown-5m-1789214400" (a 15-minute round of the
+# same asset is "btc-updown-15m-...", which this parses and the duration gate
+# then rejects).
+_CANONICAL_SLUG_RE = re.compile(
+    r"^(?P<asset>[a-z0-9]+)-updown-(?P<count>\d{1,4})(?P<unit>min|m|h|d)-(?P<start>\d{9,12})$"
+)
+_UNIT_SECONDS = {"m": 60.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
+
+# How far the API's round-end timestamp may sit from the slug's own
+# start + duration before the two are treated as disagreeing. These are minted on
+# exact boundaries, so any real drift here means the slug was misread.
+SLUG_SCHEDULE_TOLERANCE_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class CanonicalSlug:
+    """The schedule Polymarket encodes in a round's slug."""
+
+    asset_token: str
+    duration_seconds: float
+    round_start: datetime
+
+
+def parse_canonical_slug(slug: Optional[str]) -> Optional[CanonicalSlug]:
+    """Parses `{asset}-updown-{duration}-{startEpoch}`, or None if it isn't one."""
+    match = _CANONICAL_SLUG_RE.match((slug or "").strip().lower())
+    if match is None:
+        return None
+    unit_seconds = _UNIT_SECONDS.get(match.group("unit"))
+    if unit_seconds is None:
+        return None
+    try:
+        start = datetime.fromtimestamp(int(match.group("start")), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return CanonicalSlug(
+        asset_token=match.group("asset"),
+        duration_seconds=int(match.group("count")) * unit_seconds,
+        round_start=start,
+    )
+
 
 class MarketRejected(Exception):
     """Raised by classify_market when a market is not a tradable crypto round."""
@@ -127,9 +179,12 @@ class CryptoRound:
     slug: str
     question: str
     end: datetime
-    start: Optional[datetime]
+    # The round's true start, taken from the slug's epoch -- never from
+    # market.state.start_date, which is the listing time (see the module
+    # docstring). None only on the degraded fallback path.
+    round_start: Optional[datetime]
     duration_seconds: float
-    duration_source: str          # "timestamps" | "slug"
+    duration_source: str          # "slug_schedule" | "slug_marker"
     side_tokens: Dict[str, str]   # {"UP": token_id, "DOWN": token_id}
     side_prices: Dict[str, Optional[float]]
     volume: float
@@ -263,24 +318,49 @@ def _outcome_sides(market: Any) -> Dict[str, Any]:
     return sides
 
 
-def _resolve_duration(
-    start: Optional[datetime],
-    end: Optional[datetime],
+def _resolve_schedule(
+    slug: Optional[str],
+    end: datetime,
     segments: Sequence[str],
-) -> Tuple[float, str]:
-    """Determines the round's length and where that figure came from.
+    tolerance_seconds: float,
+) -> Tuple[float, Optional[datetime], str]:
+    """Determines the round's length and true start, and where they came from.
 
-    Timestamps win when Gamma hydrated both ends. Otherwise an explicit
-    5-minute marker in the slug is accepted. With neither, the round is
-    ambiguous and must not be traded.
+    Returns (duration_seconds, round_start, source).
+
+    The canonical slug is the authority: it carries the round's length and its
+    start epoch, and those are cross-checked against the API's own end date. If
+    the two disagree the slug was misread and the round is refused rather than
+    traded on a guess.
+
+    `market.state.start_date` is deliberately never consulted -- on the live API
+    it is the listing time, about a day before the round (see the module
+    docstring), so measuring a round against it rejects every genuine one.
     """
-    if start is not None and end is not None:
-        return (end - start).total_seconds(), "timestamps"
+    parsed = parse_canonical_slug(slug)
+    if parsed is not None:
+        implied_end = parsed.round_start + timedelta(seconds=parsed.duration_seconds)
+        drift = abs((end - implied_end).total_seconds())
+        if drift > tolerance_seconds:
+            raise MarketRejected(
+                REASON_WRONG_DURATION,
+                f"slug schedule disagrees with the round end: slug says "
+                f"{parsed.round_start.isoformat()} + {parsed.duration_seconds:.0f}s, "
+                f"API says {end.isoformat()} ({drift:.0f}s apart)",
+            )
+        return parsed.duration_seconds, parsed.round_start, "slug_schedule"
+
+    # Degraded fallback for a slug shape this parser does not know: accept an
+    # explicit 5-minute marker, and derive the start from the end. Without one
+    # the round length is unknown and must not be assumed.
     if has_five_minute_marker(segments):
-        return float(ROUND_DURATION_SECONDS), "slug"
+        duration = float(ROUND_DURATION_SECONDS)
+        return duration, end - timedelta(seconds=duration), "slug_marker"
+
     raise MarketRejected(
         REASON_AMBIGUOUS_DURATION,
-        "no start timestamp and no explicit 5-minute marker in the slug",
+        "slug is not in the canonical {asset}-updown-{duration}-{startEpoch} form "
+        "and carries no explicit 5-minute marker",
     )
 
 
@@ -329,13 +409,25 @@ def classify_market(
     question = str(getattr(market, "question", "") or "") or slug
     event_slugs = [getattr(e, "slug", None) for e in (getattr(market, "events", None) or ())]
     segments = slug_segments(slug, *event_slugs)
-    asset, reason = detect_asset(segments)
-    if not asset:
-        # Only fall back to the question once the slugs have come up empty, and
-        # only on whole words, so "MATIC up or down" can't be read as "TIC".
-        asset, reason = detect_asset(slug_segments(question))
-    if not asset:
-        raise MarketRejected(reason, f"no approved asset in {slug or question!r}")
+
+    # The canonical slug names the asset in one exact position, so when it parses
+    # there is nothing to infer: an unapproved coin there is unapproved, full stop.
+    canonical = parse_canonical_slug(slug)
+    if canonical is not None:
+        asset = normalize_symbol(canonical.asset_token)
+        if not asset:
+            raise MarketRejected(
+                REASON_UNKNOWN_ASSET,
+                f"{canonical.asset_token!r} is not one of the approved assets",
+            )
+    else:
+        asset, reason = detect_asset(segments)
+        if not asset:
+            # Only fall back to the question once the slugs have come up empty,
+            # and only on whole words, so "MATIC up or down" can't read as "TIC".
+            asset, reason = detect_asset(slug_segments(question))
+        if not asset:
+            raise MarketRejected(reason, f"no approved asset in {slug or question!r}")
 
     allowed = selected_symbols(allowed_symbols) if allowed_symbols is not None else None
     if allowed is not None and asset not in allowed:
@@ -345,9 +437,10 @@ def classify_market(
     end = _as_utc(getattr(state, "end_date", None) if state else None)
     if end is None:
         raise MarketRejected(REASON_NO_END_TIMESTAMP, "market has no end timestamp")
-    start = _as_utc(getattr(state, "start_date", None) if state else None)
 
-    duration, duration_source = _resolve_duration(start, end, segments)
+    duration, round_start, duration_source = _resolve_schedule(
+        slug, end, segments, SLUG_SCHEDULE_TOLERANCE_SECONDS
+    )
     if abs(duration - expected_duration_seconds) > duration_tolerance_seconds:
         raise MarketRejected(
             REASON_WRONG_DURATION,
@@ -365,7 +458,7 @@ def classify_market(
         slug=slug,
         question=question,
         end=end,
-        start=start,
+        round_start=round_start,
         duration_seconds=duration,
         duration_source=duration_source,
         side_tokens=side_tokens,

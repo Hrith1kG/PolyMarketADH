@@ -35,7 +35,7 @@ class State:
 
 
 class Metrics:
-    def __init__(self, volume=0.0, liquidity=0.0):
+    def __init__(self, volume=None, liquidity=0.0):
         self.volume = volume
         self.liquidity = liquidity
 
@@ -56,31 +56,56 @@ class FakeMarket:
         self.events = events
 
 
+def canonical_slug(asset, duration_seconds, round_start):
+    """The slug shape Polymarket actually emits: btc-updown-5m-1789214400."""
+    if duration_seconds % 3600 == 0:
+        unit = f"{int(duration_seconds // 3600)}h"
+    else:
+        unit = f"{int(duration_seconds // 60)}m"
+    return f"{asset}-updown-{unit}-{int(round_start.timestamp())}"
+
+
 def make_market(
-    slug="bitcoin-up-or-down-2026-09-12-14-05",
-    seconds_left=20,
+    asset="btc",
     duration_seconds=300,
+    seconds_left=20,
     market_id="1001",
     labels=("Up", "Down"),
     prices=(0.93, 0.07),
     tokens=("tok-up", "tok-down"),
+    slug=None,
     question=None,
-    volume=0.0,
-    liquidity=0.0,
-    start="derive",
+    volume=None,
+    liquidity=2000.0,
+    start="listing",
+    listing_offset_seconds=86400,
     now=NOW,
     naive_timestamps=False,
     events=(),
     **state_kwargs,
 ):
-    """Builds one market ending `seconds_left` from `now`.
+    """Builds one round ending `seconds_left` from `now`.
 
-    `start="derive"` places the round start `duration_seconds` before the end,
-    which is how a real fixed-length round looks. Pass start=None to model Gamma
-    not hydrating a start timestamp.
+    Defaults mirror what the live Gamma API returns for these markets:
+
+    * the slug is canonical (`btc-updown-5m-<round start epoch>`);
+    * `state.start_date` is the LISTING time, ~24h before the round -- which is
+      what the API really serves, and a trap for anything that tries to measure
+      a round with it;
+    * `metrics.volume` is None, because Gamma does not populate it on a round
+      only minutes old.
+
+    Pass `slug=` to model a non-canonical shape, or `start=None` to model the
+    field being absent entirely.
     """
     end = now + timedelta(seconds=seconds_left)
-    start_dt = (end - timedelta(seconds=duration_seconds)) if start == "derive" else start
+    round_start = end - timedelta(seconds=duration_seconds)
+    if slug is None:
+        slug = canonical_slug(asset, duration_seconds, round_start)
+    if start == "listing":
+        start_dt = end - timedelta(seconds=listing_offset_seconds)
+    else:
+        start_dt = start
     if naive_timestamps:
         end = end.replace(tzinfo=None)
         if start_dt is not None:
@@ -88,7 +113,7 @@ def make_market(
     return FakeMarket(
         id=market_id,
         slug=slug,
-        question=question if question is not None else f"{slug} Up or Down",
+        question=question if question is not None else f"{asset.upper()} Up or Down",
         state=State(start_dt, end, **state_kwargs),
         outcomes=Outcomes(
             Outcome(labels[0], tokens[0], prices[0]),

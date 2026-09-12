@@ -50,13 +50,23 @@ scan interval.
 
 A crypto entry requires **all** of the following:
 
-1. **Approved asset and exact market shape.** The underlying must be one of **BTC, ETH, SOL, XRP,
-   DOGE**, identified from whole slug segments (market, event) rather than loose title matching. The
-   market's two outcomes must be labelled exactly **Up** and **Down**, and the round's measured
-   length must be five minutes -- derived from the start/end timestamps, or from an explicit
-   5-minute marker in the slug when Gamma did not hydrate a start time. A round whose length cannot
-   be established is treated as ambiguous and skipped; an hourly "up or down" market for the same
-   coin is rejected on duration.
+1. **Approved asset and exact market shape.** Polymarket emits these rounds with a machine-readable
+   slug, `{asset}-updown-{duration}-{roundStartEpoch}` -- e.g. `btc-updown-5m-1789214400`. The
+   asset, the round length and the round's start all come from that slug, not from the title, and
+   the slug is then **cross-checked against the API's own end date**: `roundStart + duration` must
+   equal `endDate`, or the round is refused rather than traded on a misread. The underlying must be
+   one of **BTC, ETH, SOL, XRP, DOGE** (the same product also trades for BNB, HYPE and ZEC, which
+   are refused as unapproved), the two outcomes must be labelled exactly **Up** and **Down**, and
+   the length must be five minutes -- the 15-minute and hourly rounds of the *same* coin trade
+   alongside them and are rejected on duration. A slug in an unrecognised shape is accepted only if
+   it carries an explicit 5-minute marker; otherwise the round is ambiguous and skipped.
+
+   > **`market.state.start_date` is never used to measure one of these rounds.** On the live API it
+   > is the *listing* time, roughly 24 hours before the round it belongs to: `btc-updown-5m-1789214400`
+   > is published with `startDate` 2026-09-11T12:09:37Z and `endDate` 2026-09-12T12:05:00Z. Measuring
+   > end-minus-start there gives ~86,000 seconds and rejects every genuine 5-minute round. The true
+   > round start is the epoch in the slug. This is the single most important invariant in
+   > `crypto_markets.py`, and `test_crypto_markets.py` regression-tests it directly.
 2. **Live, and inside the entry window.** The market must be open and accepting orders, and the
    authoritative round-end timestamp must give
    `0 < seconds_remaining <= crypto_entry_window_seconds` (default 30). Expired, future and
@@ -92,6 +102,26 @@ Every refusal is logged with a machine-readable reason: `unapproved_asset`, `ass
 `book_one_sided`, `book_spread_too_wide`, `book_quote_stale`, `book_depth_insufficient`,
 `already_traded_this_round`, `duplicate_position`, `risk_limit`, `slippage`. Repeats of the same
 message are throttled so a 3-second cadence does not bury the log.
+
+### What the live market actually looks like
+
+Measured against the live Gamma API and CLOB, which is worth knowing before you size a position:
+
+| Observation | Consequence |
+| --- | --- |
+| `volume` is `null` on a round this young; `liquidity` is populated (~$0.3k-$12k) | `crypto_min_volume` must stay at **0** or nothing ever qualifies |
+| `tags` is an empty array on these markets | `crypto_discovery_tag_id` must stay **null**; discovery is bounded by resolution time instead |
+| `orderPriceMinTickSize` is **0.01** | The price ladder is whole cents, so a 0.90 floor sits exactly on a tick |
+| `orderMinSize` is **5 shares** | At a 0.95 ask that is a ~$4.75 minimum order |
+| Resting size at the best ask ranged from **~18 to ~1400 shares** across assets | The depth gate is the one that bites most often -- see below |
+| `feeType: crypto_fees_v2`, `feeSchedule.rate` **0.07**, taker-only | **These markets charge a taker fee; the sports markets this bot was built for do not.** At a 0.95 entry the fee is roughly `0.07 x min(p, 1-p)` ≈ 0.0035/share, about 7% of the $0.05 gross edge. Budget for it: the strategy does not model fees, because the SDK's market model does not surface the fee schedule. |
+
+**On the depth gate.** `crypto_min_ask_depth_multiple` (default 1.0) requires the best ask to hold
+enough resting size to fill your whole intended stake at the quoted price. With the default $25
+stake that is ~26 shares at 0.95, which several assets' books do not carry -- so expect
+`book_depth_insufficient` skips. That is the gate doing its job (it refuses a price you could not
+actually be filled at), not a bug. If you see it constantly, lower `crypto_stake_per_trade` rather
+than loosening the gate.
 
 ### Settings
 

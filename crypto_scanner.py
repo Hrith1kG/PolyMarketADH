@@ -386,8 +386,9 @@ def _evaluate_round(
         return skipped
 
     # Gamma's volume/liquidity figures are a coarse sanity floor here, not the
-    # real liquidity gate -- a five-minute round is young by construction, so
-    # these default to 0 and the order book below does the actual work.
+    # real liquidity gate. The live API returns volume=null on a round this
+    # young (read as 0.0), so crypto_min_volume must stay at 0 or nothing ever
+    # qualifies; the order book below does the actual work.
     if round_.volume < cfg["min_volume"]:
         _skip(REASON_BELOW_MIN_VOLUME, f"volume ${round_.volume:.0f} < ${cfg['min_volume']:.0f}")
         return skipped

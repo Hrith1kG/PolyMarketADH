@@ -102,12 +102,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "crypto_max_total_exposure": 100.0,
     "crypto_max_trades_per_day": 20,
     "crypto_max_slippage": 0.01,
-    # Gamma volume/liquidity floors. A five-minute round is young by
-    # construction, so these default to 0 and the order-book gates below carry
-    # the real liquidity requirement.
+    # Gamma volume/liquidity floors. Leave crypto_min_volume at 0: the live API
+    # returns volume=null on a round only minutes old, so any floor above 0
+    # rejects every genuine round. Liquidity IS populated (a few hundred to a
+    # few thousand dollars is typical). The order-book gates below carry the
+    # real liquidity requirement either way.
     "crypto_min_volume": 0.0,
     "crypto_min_liquidity": 0.0,
-    # Order-book health for the side being bought.
+    # Order-book health for the side being bought. Observed live: these books
+    # quote a 0.01 spread on a 0.01 tick, with anywhere from ~18 to ~1400 shares
+    # resting at the best ask -- so the depth multiple below is the gate that
+    # bites most often. See README.md before raising the stake.
     "crypto_max_spread": 0.05,
     "crypto_max_quote_age_seconds": 20.0,
     "crypto_min_ask_depth_multiple": 1.0,
@@ -118,7 +123,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # Discovery: how far past the entry window to look for upcoming rounds, so
     # a round is already known when its window opens.
     "crypto_discovery_lookahead_seconds": 420,
-    "crypto_discovery_tag_id": None,   # optional Gamma tag id to narrow the scan
+    # Optional Gamma tag id to narrow the scan. Leave null: these rounds are
+    # served with an empty tags array, so a tag filter finds nothing. Discovery
+    # is bounded by resolution time instead, which needs no tag.
+    "crypto_discovery_tag_id": None,
     "crypto_discovery_page_size": 100,
     "crypto_discovery_max_pages": 3,
     "crypto_order_type": "LIMIT",      # "LIMIT" or "MARKET"
