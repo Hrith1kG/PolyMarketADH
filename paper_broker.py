@@ -252,6 +252,122 @@ class PaperBroker:
         dt["count"] = dt.get("count", 0) + 1
         per_acc[account_name] = dt
 
+    # --- Crypto 5-minute round ledger -------------------------------------
+    # The crypto strategy polls every few seconds inside a window that may be as
+    # short as 30 seconds, from its own thread, alongside a dashboard process
+    # reading the same state file. "One entry per market/round" therefore has to
+    # be enforced by an atomic claim that survives repeated scans, concurrent
+    # threads, separate processes AND a restart -- not by an in-memory set. The
+    # claim lives in state.json and is taken under the same file+thread lock as
+    # every other state mutation.
+
+    CRYPTO_LEDGER_KEY = "crypto_rounds"
+    # Claims are pruned well after the round they refer to has resolved: long
+    # enough that a restart mid-round cannot lose one, short enough that the
+    # ledger does not grow without bound.
+    CRYPTO_LEDGER_TTL_SECONDS = 24 * 3600
+
+    def _prune_crypto_rounds(self, ledger: Dict[str, Any]) -> None:
+        cutoff = time.time() - self.CRYPTO_LEDGER_TTL_SECONDS
+        for key in [k for k, v in ledger.items() if float((v or {}).get("claimed_ts", 0) or 0) < cutoff]:
+            ledger.pop(key, None)
+
+    def claimed_crypto_round_keys(self) -> set:
+        """Round keys that already have (or are mid-way through) an entry."""
+        return set(self.state.get(self.CRYPTO_LEDGER_KEY, {}).keys())
+
+    def claim_crypto_round(self, round_key: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Atomically reserves a round for entry.
+
+        Returns True to exactly one caller per round key; every later caller
+        gets False until the claim is released. The claim is taken BEFORE the
+        order is submitted, so two polls that overlap cannot both fire.
+        """
+        if not round_key:
+            return False
+        with self._transaction() as state:
+            ledger = state.setdefault(self.CRYPTO_LEDGER_KEY, {})
+            self._prune_crypto_rounds(ledger)
+            if round_key in ledger:
+                return False
+            entry = {"claimed_ts": time.time(), "claimed_at": _now_iso(), "status": "CLAIMED"}
+            entry.update(metadata or {})
+            ledger[round_key] = entry
+            return True
+
+    def release_crypto_round(self, round_key: str) -> None:
+        """Gives a claim back when no order was placed.
+
+        A pre-trade re-check that refuses the entry (price slipped, window
+        closed, risk cap hit) must release, or a round that later qualifies
+        again inside the same window would be locked out for no reason. A claim
+        behind a submitted order is never released -- see confirm_crypto_round.
+        """
+        if not round_key:
+            return
+        with self._transaction() as state:
+            ledger = state.setdefault(self.CRYPTO_LEDGER_KEY, {})
+            entry = ledger.get(round_key)
+            if entry is not None and entry.get("status") in (None, "CLAIMED"):
+                ledger.pop(round_key, None)
+
+    def confirm_crypto_round(self, round_key: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Marks a claim as spent because an order reached the exchange.
+
+        Called for fills AND for orders left resting: both mean an order exists
+        against this round, and placing a second one would double the intended
+        exposure. Confirmed claims are never released.
+        """
+        if not round_key:
+            return
+        with self._transaction() as state:
+            ledger = state.setdefault(self.CRYPTO_LEDGER_KEY, {})
+            entry = dict(ledger.get(round_key) or {"claimed_ts": time.time(), "claimed_at": _now_iso()})
+            entry["status"] = "ENTERED"
+            entry["entered_at"] = _now_iso()
+            entry.update(metadata or {})
+            ledger[round_key] = entry
+
+    def crypto_trades_today(self) -> int:
+        """Crypto entries booked today, for the strategy's own daily cap.
+
+        Counted separately from the sports daily counter so neither strategy can
+        consume the other's budget.
+        """
+        dt = self.state.get("crypto_daily_trades", {})
+        if dt.get("date") != _today_str():
+            return 0
+        return int(dt.get("count", 0))
+
+    def record_crypto_trade(self) -> int:
+        """Increments today's crypto entry count and returns the new total."""
+        with self._transaction() as state:
+            dt = state.setdefault("crypto_daily_trades", {"date": _today_str(), "count": 0})
+            if dt.get("date") != _today_str():
+                dt["date"] = _today_str()
+                dt["count"] = 0
+            dt["count"] = int(dt.get("count", 0)) + 1
+            return dt["count"]
+
+    def save_crypto_signals(self, opportunities) -> None:
+        """Caches the crypto strategy's current signals under their own state key.
+
+        Deliberately NOT save_signals(): that key belongs to the sports scan and
+        the two strategies run on different cadences from different threads, so
+        sharing it would have each strategy erasing the other's feed.
+        """
+        payload = [o.to_dict() if hasattr(o, "to_dict") else dict(o) for o in opportunities]
+        with self._transaction() as state:
+            state["crypto_signals"] = payload
+
+    def crypto_positions(self) -> Dict[str, Any]:
+        """Open positions opened by the crypto strategy, identified by the
+        market type stamped on them at entry."""
+        return {
+            k: p for k, p in self.state.get("positions", {}).items()
+            if str(p.get("market_type", "")).startswith("crypto_")
+        }
+
     def can_open(
         self,
         stake: float,

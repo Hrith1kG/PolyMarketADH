@@ -71,6 +71,57 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # Recognised keys: enabled, allow_worst_case, max_remaining_minutes,
     # max_remaining_fraction.
     "late_game_sport_rules": {},
+
+    # =====================================================================
+    # Crypto 5-Minute strategy -- a SEPARATE strategy from Sports.
+    # Every key is namespaced `crypto_*` and is read only by crypto_scanner /
+    # crypto_strategy. No sports key is consulted by the crypto path and no
+    # crypto key is consulted by scanner.py, so the two can be tuned (and
+    # paused, and kill-switched) completely independently.
+    # =====================================================================
+    "crypto_enabled": False,           # off until deliberately switched on
+    "crypto_bot_status": "RUNNING",    # "RUNNING" or "PAUSED", crypto only
+    "crypto_entry_kill_switch": False, # blocks crypto entries only
+    # Approved universe. Anything outside crypto_markets.APPROVED_ASSETS is
+    # ignored even if it is listed here.
+    "crypto_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
+    # Entry timing: trade only when 0 < seconds_remaining <= this value,
+    # measured against the round's authoritative end timestamp.
+    "crypto_entry_window_seconds": 30,
+    # Probability floor: the executable ask on the side being bought.
+    "crypto_min_probability": 0.90,
+    # Ceiling: at ~1.00 there is no profit left to pay for the tail risk, and
+    # the fill is pure downside. Raise to 1.0 to disable.
+    "crypto_max_probability": 0.999,
+    # Polling must be fast enough not to miss a 30-second window. This is the
+    # crypto cadence only -- poll_interval_seconds still governs sports.
+    "crypto_poll_interval_seconds": 3,
+    # Risk budget, kept separate from the sports budget.
+    "crypto_stake_per_trade": 25.0,
+    "crypto_max_open_positions": 5,
+    "crypto_max_total_exposure": 100.0,
+    "crypto_max_trades_per_day": 20,
+    "crypto_max_slippage": 0.01,
+    # Gamma volume/liquidity floors. A five-minute round is young by
+    # construction, so these default to 0 and the order-book gates below carry
+    # the real liquidity requirement.
+    "crypto_min_volume": 0.0,
+    "crypto_min_liquidity": 0.0,
+    # Order-book health for the side being bought.
+    "crypto_max_spread": 0.05,
+    "crypto_max_quote_age_seconds": 20.0,
+    "crypto_min_ask_depth_multiple": 1.0,
+    # Round shape. These markets are fixed 5-minute rounds; a market whose
+    # measured duration is outside this band is not one of them and is skipped.
+    "crypto_round_duration_seconds": 300,
+    "crypto_round_duration_tolerance_seconds": 20,
+    # Discovery: how far past the entry window to look for upcoming rounds, so
+    # a round is already known when its window opens.
+    "crypto_discovery_lookahead_seconds": 420,
+    "crypto_discovery_tag_id": None,   # optional Gamma tag id to narrow the scan
+    "crypto_discovery_page_size": 100,
+    "crypto_discovery_max_pages": 3,
+    "crypto_order_type": "LIMIT",      # "LIMIT" or "MARKET"
 }
 
 # Late Game settings that were replaced by the live-state rewrite. They are dropped on

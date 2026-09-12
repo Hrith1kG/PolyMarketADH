@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import config
+import crypto_markets
 
 
 def _parse_sport_rules(text, fallback):
@@ -679,7 +680,9 @@ with st.sidebar:
     # instead of one long scroll, while still saving together as a single config. ---
     with st.form("sidebar_config_form"):
         st.markdown('<div style="font-family:\'Space Grotesk\',sans-serif;font-weight:700;font-size:0.95rem;color:#E7ECF3;margin-bottom:2px;">⚙️ Strategy Configuration</div>', unsafe_allow_html=True)
-        sb_tab_general, sb_tab_gates, sb_tab_risk, sb_tab_wallet = st.tabs(["General", "Gates", "Risk", "Wallet"])
+        sb_tab_general, sb_tab_gates, sb_tab_risk, sb_tab_crypto, sb_tab_wallet = st.tabs(
+            ["General", "Gates", "Risk", "Crypto 5m", "Wallet"]
+        )
 
         with sb_tab_general:
             poll_interval = st.number_input(
@@ -862,6 +865,127 @@ with st.sidebar:
                 step=1,
             )
 
+        with sb_tab_crypto:
+            # The Crypto 5-Minute strategy is configured entirely separately from
+            # Sports above: different assets, different timing rule, different risk
+            # budget. Nothing in this tab changes any sports setting.
+            st.caption(
+                "Live Polymarket **Up or Down - 5 Min** rounds. Buys the Up or Down "
+                "side only when its executable ask clears the probability floor "
+                "inside the entry window. Independent of the Sports strategy."
+            )
+            crypto_enabled = st.checkbox(
+                "Enable Crypto 5-Minute Strategy",
+                value=bool(settings.get("crypto_enabled", False)),
+            )
+            crypto_paused = st.checkbox(
+                "Pause Crypto Strategy",
+                value=str(settings.get("crypto_bot_status", "RUNNING")).upper() == "PAUSED",
+                help="Pauses crypto scanning only. The Sports loop keeps running.",
+            )
+            crypto_kill = st.checkbox(
+                "Crypto Entry Kill Switch",
+                value=bool(settings.get("crypto_entry_kill_switch", False)),
+                help="Blocks new crypto entries only.",
+            )
+            crypto_assets = st.multiselect(
+                "Approved Assets",
+                options=[a.symbol for a in crypto_markets.APPROVED_ASSETS],
+                default=list(crypto_markets.selected_symbols(settings.get("crypto_assets"))),
+            )
+            crypto_window = st.number_input(
+                "Entry Window (seconds before round end)",
+                min_value=5,
+                max_value=300,
+                value=int(settings.get("crypto_entry_window_seconds", 30)),
+                step=5,
+                help="Enter only while 0 < seconds remaining <= this value.",
+            )
+            crypto_min_prob = st.slider(
+                "Min Probability (executable ask)",
+                min_value=0.50,
+                max_value=0.999,
+                value=float(settings.get("crypto_min_probability", 0.90)),
+                step=0.005,
+                format="%.3f",
+            )
+            crypto_max_prob = st.slider(
+                "Max Probability (entry ceiling)",
+                min_value=0.90,
+                max_value=1.0,
+                value=float(settings.get("crypto_max_probability", 0.999)),
+                step=0.001,
+                format="%.3f",
+            )
+            crypto_poll = st.number_input(
+                "Crypto Poll Interval (seconds)",
+                min_value=1,
+                max_value=60,
+                value=int(settings.get("crypto_poll_interval_seconds", 3)),
+                step=1,
+                help="Must be well inside the entry window. Does not affect the Sports cadence.",
+            )
+            st.markdown("**Crypto Risk Budget**")
+            crypto_stake = st.number_input(
+                "Crypto Stake Per Trade ($)",
+                min_value=1.0,
+                max_value=1000.0,
+                value=float(settings.get("crypto_stake_per_trade", 25.0)),
+                step=5.0,
+            )
+            crypto_max_pos = st.number_input(
+                "Crypto Max Open Positions",
+                min_value=1,
+                max_value=50,
+                value=int(settings.get("crypto_max_open_positions", 5)),
+                step=1,
+            )
+            crypto_max_exp = st.number_input(
+                "Crypto Max Total Exposure ($)",
+                min_value=10.0,
+                max_value=5000.0,
+                value=float(settings.get("crypto_max_total_exposure", 100.0)),
+                step=25.0,
+            )
+            crypto_max_daily = st.number_input(
+                "Crypto Max Trades Per Day",
+                min_value=1,
+                max_value=500,
+                value=int(settings.get("crypto_max_trades_per_day", 20)),
+                step=1,
+            )
+            crypto_slippage = st.number_input(
+                "Crypto Max Slippage",
+                min_value=0.0,
+                max_value=0.10,
+                value=float(settings.get("crypto_max_slippage", 0.01)),
+                step=0.005,
+                format="%.3f",
+            )
+            st.markdown("**Crypto Order Book Gates**")
+            crypto_spread = st.number_input(
+                "Max Spread",
+                min_value=0.0,
+                max_value=0.50,
+                value=float(settings.get("crypto_max_spread", 0.05)),
+                step=0.005,
+                format="%.3f",
+            )
+            crypto_quote_age = st.number_input(
+                "Max Quote Age (seconds)",
+                min_value=0.0,
+                max_value=120.0,
+                value=float(settings.get("crypto_max_quote_age_seconds", 20.0)),
+                step=5.0,
+            )
+            crypto_depth = st.number_input(
+                "Min Ask Depth (x intended size)",
+                min_value=0.0,
+                max_value=10.0,
+                value=float(settings.get("crypto_min_ask_depth_multiple", 1.0)),
+                step=0.25,
+            )
+
         with sb_tab_wallet:
             st.markdown("**👛 Wallet Tracking (Data API)**")
             tracked_wallet = st.text_input(
@@ -899,6 +1023,24 @@ with st.sidebar:
                 "max_signals_per_scan": max_signals,
                 "only_sports": only_sports,
                 "sports_market_types": ["moneyline"] if only_moneyline else [],
+                # Crypto 5-Minute strategy -- namespaced so it can never collide
+                # with the sports keys above.
+                "crypto_enabled": crypto_enabled,
+                "crypto_bot_status": "PAUSED" if crypto_paused else "RUNNING",
+                "crypto_entry_kill_switch": crypto_kill,
+                "crypto_assets": list(crypto_markets.selected_symbols(crypto_assets)),
+                "crypto_entry_window_seconds": int(crypto_window),
+                "crypto_min_probability": float(crypto_min_prob),
+                "crypto_max_probability": float(crypto_max_prob),
+                "crypto_poll_interval_seconds": int(crypto_poll),
+                "crypto_stake_per_trade": float(crypto_stake),
+                "crypto_max_open_positions": int(crypto_max_pos),
+                "crypto_max_total_exposure": float(crypto_max_exp),
+                "crypto_max_trades_per_day": int(crypto_max_daily),
+                "crypto_max_slippage": float(crypto_slippage),
+                "crypto_max_spread": float(crypto_spread),
+                "crypto_max_quote_age_seconds": float(crypto_quote_age),
+                "crypto_min_ask_depth_multiple": float(crypto_depth),
             }
             settings.update(updated_settings)
             settings_manager.save_settings(settings)
@@ -1288,6 +1430,57 @@ with tab_overview:
             )
             
     render_signals_table()
+
+    # --- Crypto 5-Minute feed -------------------------------------------------
+    # Rendered from its own state key and its own settings so the two strategies
+    # never overwrite each other's feed or borrow each other's thresholds.
+    st.markdown("##### Crypto 5-Minute Signals")
+    _crypto_on = bool(settings.get("crypto_enabled", False))
+    _crypto_paused = str(settings.get("crypto_bot_status", "RUNNING")).upper() == "PAUSED"
+    _crypto_state = "Disabled" if not _crypto_on else ("Paused" if _crypto_paused else "Running")
+    st.markdown(
+        f'<div class="sst-section-sub">Live <b>Up or Down - 5 Min</b> rounds for '
+        f'{", ".join(crypto_markets.selected_symbols(settings.get("crypto_assets"))) or "no assets"} '
+        f'within {int(settings.get("crypto_entry_window_seconds", 30))}s of round end, at or above '
+        f'{float(settings.get("crypto_min_probability", 0.90)):.2f}. Strategy: <b>{_crypto_state}</b>.</div>',
+        unsafe_allow_html=True,
+    )
+
+    @st.fragment(run_every="5s")
+    def render_crypto_signals_table():
+        broker = get_broker()
+        state = broker.reload()
+        current = state.get("crypto_signals", [])
+        if not current:
+            st.info("No crypto round is currently inside the entry window at or above the probability floor.")
+            return
+        rows = []
+        for c in current:
+            slug = c.get("slug", "") or ""
+            rows.append({
+                "Polymarket": database.get_polymarket_url(slug, c.get("market_id")),
+                "Asset": c.get("asset", ""),
+                "Side": c.get("outcome_label", ""),
+                "Ask": float(c.get("confirmed_price", 0) or 0.0),
+                "Implied %": round(float(c.get("confirmed_price", 0) or 0.0) * 100, 1),
+                "Seconds Left": round(float(c.get("seconds_remaining", 0) or 0.0), 1),
+                "Size at Ask": float(c.get("ask_size", 0) or 0.0),
+                "Round Ends": c.get("end_date", "N/A"),
+            })
+        st.dataframe(
+            pd.DataFrame(rows),
+            column_config={
+                "Polymarket": st.column_config.LinkColumn("Polymarket", display_text="View Round ↗"),
+                "Ask": st.column_config.NumberColumn("Ask", format="$%.3f"),
+                "Implied %": st.column_config.ProgressColumn("Implied %", format="%.1f%%", min_value=0, max_value=100),
+                "Seconds Left": st.column_config.NumberColumn("Seconds Left", format="%.1f s"),
+                "Size at Ask": st.column_config.NumberColumn("Size at Ask", format="%.2f"),
+            },
+            hide_index=True,
+            width="stretch",
+        )
+
+    render_crypto_signals_table()
 
     if signals:
 

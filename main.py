@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Tuple
 
 import config
+import crypto_strategy
 import scanner
 import settings_manager
 from paper_broker import PaperBroker
@@ -95,12 +96,39 @@ def _opportunity_matches_account(opp, acc_settings) -> Tuple[bool, str]:
     return True, ""
 
 
+def _start_crypto_strategy():
+    """Starts the Crypto 5-Minute strategy on its own thread and broker handle.
+
+    It is a genuinely separate strategy: its own settings, its own candidate
+    discovery and its own polling cadence (seconds, not minutes, because a
+    30-second entry window cannot be caught on the sports interval). Running it
+    on a dedicated thread is what keeps the two cadences independent -- the
+    sports loop below is unchanged and never waits on a crypto poll.
+
+    It gets its own PaperBroker instance rather than sharing this loop's: every
+    state mutation already goes through a file+thread lock, and separate
+    instances mean neither loop can hand the other a stale in-memory snapshot.
+    A failure to start is logged and ignored -- crypto must never take the
+    sports loop down with it.
+    """
+    try:
+        crypto_broker = PaperBroker()
+        strategy, thread = crypto_strategy.start_crypto_thread(crypto_broker, log=log)
+        log("Crypto 5-Minute strategy thread started (independent of the sports scan cadence).")
+        return strategy, thread
+    except Exception as exc:
+        log(f"Could not start the Crypto 5-Minute strategy: {exc}")
+        return None, None
+
+
 def run():
     broker = PaperBroker()
     live = None
 
     broker.add_log("Polymarket Sureshot Bot initialized.")
     log("Polymarket Sureshot Bot started.")
+
+    _start_crypto_strategy()
 
     while True:
         try:
