@@ -14,6 +14,20 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import config
+
+
+def _parse_sport_rules(text, fallback):
+    """Parses the per-sport override editor, keeping the saved rules if it is invalid."""
+    try:
+        parsed = json.loads(text or "{}")
+    except (ValueError, TypeError):
+        st.warning("Per-sport overrides are not valid JSON - keeping the previous rules.")
+        return fallback or {}
+    if not isinstance(parsed, dict):
+        st.warning("Per-sport overrides must be a JSON object - keeping the previous rules.")
+        return fallback or {}
+    return parsed
+
 import paper_broker
 from paper_broker import PaperBroker
 import database
@@ -706,17 +720,60 @@ with st.sidebar:
             late_game_enabled = st.checkbox(
                 "Late Game Enabled",
                 value=bool(settings.get("late_game_enabled", False)),
+                help="Scan only matches the server reports as live, and enter only "
+                     "when that sport's own in-play state says little real time is "
+                     "left. end_date is never used to judge this.",
             )
-            req_auth_time = st.checkbox(
-                "Require Authoritative Time",
-                value=bool(settings.get("require_authoritative_time", False)),
+            late_game_max_minutes = st.number_input(
+                "Max Remaining Game Time (minutes)",
+                min_value=1.0,
+                max_value=240.0,
+                value=float(settings.get("late_game_max_remaining_minutes", 30.0)),
+                step=1.0,
+                help="Absolute cap on estimated wall-clock minutes left in the match.",
             )
-            late_game_threshold = st.number_input(
-                "Late Game Threshold (seconds)",
-                min_value=60,
-                max_value=3600,
-                value=int(settings.get("late_game_threshold_seconds", 600)),
-                step=30,
+            late_game_fraction = st.slider(
+                "...or this share of the format's full length",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(settings.get("late_game_max_remaining_fraction", 0.34)),
+                step=0.01,
+                help="The tighter of the two caps applies, so 'late game' means the "
+                     "same share of a 20-minute esports map as of a 210-minute "
+                     "football game. Set to 0 to use the minute cap alone.",
+            )
+            late_game_min_prob = st.slider(
+                "Min Entry Probability",
+                min_value=0.50,
+                max_value=0.999,
+                value=float(settings.get("late_game_min_probability", 0.90)),
+                step=0.005,
+                format="%.3f",
+                help="Floor for the exact outcome token being bought. While Late "
+                     "Game is on this band replaces Min/Max Price entirely.",
+            )
+            late_game_max_prob = st.slider(
+                "Max Entry Probability",
+                min_value=0.50,
+                max_value=0.999,
+                value=float(settings.get("late_game_max_probability", 0.99)),
+                step=0.005,
+                format="%.3f",
+            )
+            late_game_worst_case = st.checkbox(
+                "Estimate sports with no in-period clock",
+                value=bool(settings.get("late_game_allow_worst_case_periods", True)),
+                help="NBA quarters and NHL periods publish no clock. When on, the "
+                     "whole current period is assumed to remain (never enters early). "
+                     "When off, those sports are skipped instead.",
+            )
+            late_game_rules_text = st.text_area(
+                "Per-sport overrides (JSON)",
+                value=json.dumps(settings.get("late_game_sport_rules", {}) or {}, indent=2),
+                height=120,
+                help='Keyed by sport code, e.g. {"nhl": {"max_remaining_minutes": 45}}. '
+                     'Keys: enabled, allow_worst_case, max_remaining_minutes, '
+                     'max_remaining_fraction.',
             )
 
         with sb_tab_risk:
@@ -798,8 +855,13 @@ with st.sidebar:
                 "require_healthy_data": req_healthy,
                 "require_high_confidence": req_high_conf,
                 "late_game_enabled": late_game_enabled,
-                "require_authoritative_time": req_auth_time,
-                "late_game_threshold_seconds": late_game_threshold,
+                "late_game_max_remaining_minutes": float(late_game_max_minutes),
+                "late_game_max_remaining_fraction": float(late_game_fraction),
+                "late_game_min_probability": float(late_game_min_prob),
+                "late_game_max_probability": float(late_game_max_prob),
+                "late_game_allow_worst_case_periods": late_game_worst_case,
+                "late_game_sport_rules": _parse_sport_rules(
+                    late_game_rules_text, settings.get("late_game_sport_rules", {})),
                 "tracked_wallet_address": tracked_wallet.strip(),
                 "price_min": price_min,
                 "price_max": price_max,
@@ -863,6 +925,7 @@ tab_overview, tab_control, tab_history, tab_collab = st.tabs([
 ])
 
 
+
 def build_gates_data():
     p_floor = float(settings.get("price_min", 0.97)) * 100
     p_ceil = float(settings.get("price_max", 0.995)) * 100
@@ -872,7 +935,13 @@ def build_gates_data():
     slippage = float(settings.get("max_slippage", 0.005) or 0.0)
     late_game_on = bool(settings.get("late_game_enabled", False))
     min_hours = float(settings.get("min_hours_to_resolution", 1.0))
-    late_threshold = int(settings.get("late_game_threshold_seconds", 600))
+    late_minutes = float(settings.get("late_game_max_remaining_minutes", 30.0))
+    late_fraction = float(settings.get("late_game_max_remaining_fraction", 0.34))
+    # With Late Game on the entry band is its own; price_min/price_max do not apply,
+    # so showing them here would misreport what is actually being enforced.
+    if late_game_on:
+        p_floor = float(settings.get("late_game_min_probability", 0.90)) * 100
+        p_ceil = float(settings.get("late_game_max_probability", 0.99)) * 100
     return [
         {"Rule": "Probability Floor Threshold", "Value": f"= {p_floor:.2f}%", "Status": "ENFORCED"},
         {"Rule": "Probability Ceiling Threshold", "Value": f"= {p_ceil:.2f}%", "Status": "ENFORCED"},
@@ -883,8 +952,10 @@ def build_gates_data():
         # Late Game replaces the resolution-window floor rather than stacking with it,
         # so report which one is actually in force instead of always showing min_hours.
         {
-            "Rule": "Resolution Window Floor",
-            "Value": f"Late Game: ≤ {late_threshold}s to resolve" if late_game_on else f"≥ {min_hours:g}h to resolve",
+            "Rule": "Entry Timing Gate",
+            "Value": (f"Live game: ≤ {late_minutes:g} min left"
+                      + (f" or {late_fraction:.0%} of the format" if late_fraction > 0 else "")
+                      ) if late_game_on else f"≥ {min_hours:g}h to resolve",
             "Status": "ENFORCED",
         },
         {"Rule": "Cooldown Timer / Loop Interval", "Value": f"{cooldown}s", "Status": "ENFORCED"},
@@ -974,14 +1045,27 @@ with tab_overview:
             settings_manager.update_setting("manual_scan_requested", True)
             with st.spinner("Scanning Polymarket sports markets..."):
                 opps = scanner.find_opportunities(held_token_ids=broker.held_token_ids)
+                rejections = scanner.rejection_summary()
                 broker.save_signals(opps)
-                broker.add_log(f"Manual scan completed: {len(opps)} opportunities found.")
+                broker.add_log(f"Manual scan completed: {len(opps)} opportunities found."
+                               + (f" Rejected: {rejections}." if rejections else ""))
             # A failed scan used to be indistinguishable from an empty one.
             if scanner.LAST_SCAN_ERROR:
                 st.error(f"Scan failed: {scanner.LAST_SCAN_ERROR}. Results below may be incomplete.")
             else:
                 st.success(f"Scan complete! Found {len(opps)} signals.")
+            # An empty scan is otherwise unexplainable from the UI: say whether nothing
+            # was live, everything was too early, or the prices were simply out of band.
+            if not opps and rejections:
+                st.session_state["last_scan_rejections"] = rejections
             st.rerun()
+
+    last_rejections = st.session_state.pop("last_scan_rejections", None)
+    if last_rejections:
+        pretty = ", ".join(f"{reason.replace('_', ' ')}: {count}"
+                           for reason, count in sorted(last_rejections.items(),
+                                                       key=lambda kv: -kv[1]))
+        st.info(f"No signals. Candidates were rejected for - {pretty}.")
 
     # --- Metrics row ---
     with st.container(horizontal=True):

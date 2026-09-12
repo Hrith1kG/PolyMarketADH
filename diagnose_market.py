@@ -14,6 +14,7 @@ from polymarket import RateLimitError, PolymarketError
 import polymarket_client
 import settings_manager
 import scanner
+import live_timing
 
 OK, NO, INFO = "PASS", "FAIL", "  ->"
 _verdicts = []
@@ -100,6 +101,47 @@ def resolve_markets(client, slug):
     return []
 
 
+
+def diagnose_live_timing(market, s):
+    """Explains the Late Game timing verdict for the event this market belongs to.
+
+    The in-play fields (period / elapsed / score) live on the Event, not the Market,
+    so this resolves the parent event through the live-event feed before judging.
+    """
+    print("\n-- LIVE GAME TIMING (Late Game) --")
+    client = polymarket_client.get_public_client()
+    event = None
+    try:
+        for page in client.list_events(live=True, closed=False, page_size=100):
+            for candidate in (page.items or []):
+                if any(str(m.id) == str(market.id) for m in (candidate.markets or [])):
+                    event = candidate
+                    break
+            if event:
+                break
+    except Exception as exc:
+        print(f"{INFO} could not read the live-event feed: {type(exc).__name__}: {exc}")
+        return
+
+    if event is None:
+        print(f"  [{NO}] this market's event is not in the live-event feed, so Late Game "
+              f"never sees it.\n       Either the match is not underway, or Polymarket "
+              f"does not mark it live.")
+        return
+
+    sp = event.sports
+    print(f"{INFO} event: {event.title!r}")
+    print(f"{INFO} sport={live_timing.sport_code(event)!r} period={sp.period!r} "
+          f"elapsed={sp.elapsed!r} score={sp.score!r}")
+    print(f"{INFO} state.live={event.state.live!r} state.ended={event.state.ended!r}")
+
+    decision = live_timing.evaluate_event_timing(event, s)
+    check("late game timing", decision.eligible, decision.describe())
+    if not decision.eligible and decision.reason == live_timing.REASON_SPORT_UNSUPPORTED:
+        print(f"{INFO} add a rule to live_timing.SPORT_RULES (or a family tag) to "
+              f"support this sport.")
+
+
 def diagnose(market, s):
     print("=" * 78)
     print(f"MARKET: {market.question or market.slug}")
@@ -125,32 +167,27 @@ def diagnose(market, s):
     late = bool(s.get("late_game_enabled", False))
     min_hours = float(s.get("min_hours_to_resolution", 1.0))
     max_days = float(s.get("max_days_to_resolution", 30.0))
-    eff_min_hours = 0.0 if late else min_hours
 
     if st:
         check("state.closed is False", not st.closed, f"closed={st.closed}")
         check("accepting_orders", st.accepting_orders is not False,
               f"accepting_orders={st.accepting_orders}")
-        in_win = scanner._within_resolution_window(end_dt, eff_min_hours, max_days)
-        hrs = ((end_dt.replace(tzinfo=timezone.utc) if end_dt and end_dt.tzinfo is None else end_dt)
-               - datetime.now(timezone.utc)).total_seconds() / 3600.0 if end_dt else None
-        check("resolution window", in_win,
-              f"{hrs:+.2f}h to resolve; need >= {eff_min_hours}h and <= {max_days}d"
-              + ("  (late_game ON -> floor waived)" if late else ""))
         if late:
-            ok = scanner._late_game_ok(start_dt, end_dt,
-                                       float(s.get("late_game_threshold_seconds", 600)),
-                                       bool(s.get("require_authoritative_time", False)))
-            secs = ((end_dt.replace(tzinfo=timezone.utc) if end_dt.tzinfo is None else end_dt)
-                    - datetime.now(timezone.utc)).total_seconds() if end_dt else None
-            check("late_game_ok", ok,
-                  f"threshold={s.get('late_game_threshold_seconds')}s, "
-                  f"require_authoritative_time={s.get('require_authoritative_time')}")
-            if secs is not None and secs > float(s.get("late_game_threshold_seconds", 600)):
-                print(f"{INFO} late_game compares end_date, not the match end: "
-                      f"{secs/3600:.1f}h remain vs a {float(s.get('late_game_threshold_seconds', 600))/60:.0f}min "
-                      f"threshold.\n       If end_date is a generic expiry rather than the "
-                      f"expected finish, this gate\n       can never pass for this market.")
+            # The resolution window is not applied at all on the Late Game path:
+            # end_date means a different thing in every sport (start_time for soccer,
+            # start+7d for tennis), so it decides nothing about entry timing.
+            print(f"{INFO} late_game is ON: the end_date resolution window is not "
+                  f"applied.\n       Timing comes from live in-play state instead -- "
+                  f"see the LIVE GAME TIMING block below.")
+        else:
+            in_win = scanner._within_resolution_window(end_dt, min_hours, max_days)
+            hrs = ((end_dt.replace(tzinfo=timezone.utc) if end_dt and end_dt.tzinfo is None else end_dt)
+                   - datetime.now(timezone.utc)).total_seconds() / 3600.0 if end_dt else None
+            check("resolution window", in_win,
+                  f"{hrs:+.2f}h to resolve; need >= {min_hours}h and <= {max_days}d")
+
+    if late:
+        diagnose_live_timing(market, s)
 
     # ---- Category filters ----
     print("\n-- CATEGORY / TYPE --")
@@ -265,7 +302,9 @@ def main():
               "max_signals_per_scan", "stake_per_trade", "only_sports",
               "sports_market_types", "sports_tag_id", "require_healthy_data",
               "require_high_confidence", "late_game_enabled",
-              "require_authoritative_time", "late_game_threshold_seconds"):
+              "late_game_max_remaining_minutes", "late_game_max_remaining_fraction",
+              "late_game_min_probability", "late_game_max_probability",
+              "late_game_allow_worst_case_periods", "late_game_sport_rules"):
         print(f"  {k:<30} = {s.get(k)!r}")
 
     client = polymarket_client.get_public_client()

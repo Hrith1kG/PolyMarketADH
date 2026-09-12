@@ -242,6 +242,10 @@ open positions is destroyed, orphaning them.
 - `require_high_confidence` — written by `dashboard.py:778`, never read by `scanner.py`.
 - `min_hours_to_resolution` — silently forced to `0.0` whenever Late Game is enabled
   (`scanner.py:136`), while the Circuit Breakers table still reports it as ENFORCED.
+  *Resolved.* Late Game now runs its own scan over authoritatively live events and
+  does not consult `end_date` at all, so the resolution window simply does not apply
+  on that path. The Circuit Breakers table reports the timing gate actually in force
+  (see `docs/LATE_GAME_TIMING.md`).
 
 ---
 

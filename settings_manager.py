@@ -41,10 +41,36 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "require_healthy_data": True,
     "require_high_confidence": False,
     # Late Game Settings
+    #
+    # "Late game" is decided from authoritative live in-play state (see live_timing.py
+    # and docs/LATE_GAME_TIMING.md), never from end_date -- end_date means a different
+    # thing in every sport and says nothing about when a match finishes.
     "late_game_enabled": False,
-    "require_authoritative_time": False,
-    "late_game_threshold_seconds": 600,
+    # Absolute cap on estimated wall-clock minutes left in the match.
+    "late_game_max_remaining_minutes": 30.0,
+    # Proportional cap: a share of that format's own typical full duration, so the
+    # rule means the same thing in a 210-minute football game and a 20-minute esports
+    # map. The tighter of the two caps applies. Set to 0 to use the absolute cap only.
+    "late_game_max_remaining_fraction": 0.34,
+    # Entry probability band for the exact outcome token being bought. While Late Game
+    # is enabled these replace price_min/price_max so the configured band is the band.
+    "late_game_min_probability": 0.90,
+    "late_game_max_probability": 0.99,
+    # Sports with no in-period clock (NBA quarters, NHL periods) are estimated by
+    # assuming the whole current period is still to play. Turn this off to skip those
+    # sports instead of estimating them.
+    "late_game_allow_worst_case_periods": True,
+    # Per-sport overrides keyed by sport code, e.g.
+    #   {"nfl": {"max_remaining_minutes": 45}, "nhl": {"enabled": False}}
+    # Recognised keys: enabled, allow_worst_case, max_remaining_minutes,
+    # max_remaining_fraction.
+    "late_game_sport_rules": {},
 }
+
+# Late Game settings that were replaced by the live-state rewrite. They are dropped on
+# load so a settings.json written by the old end_date logic cannot silently reintroduce
+# a threshold nothing reads any more.
+RETIRED_SETTINGS = ("require_authoritative_time", "late_game_threshold_seconds")
 
 
 def load_settings() -> Dict[str, Any]:
@@ -56,6 +82,8 @@ def load_settings() -> Dict[str, Any]:
                 saved = json.load(f)
                 if isinstance(saved, dict):
                     settings.update(saved)
+                    for retired in RETIRED_SETTINGS:
+                        settings.pop(retired, None)
         except Exception as e:
             print(f"[settings_manager] Warning: Failed to read {SETTINGS_FILE}: {e}")
     else:
