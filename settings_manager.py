@@ -116,6 +116,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "crypto_max_spread": 0.05,
     "crypto_max_quote_age_seconds": 20.0,
     "crypto_min_ask_depth_multiple": 1.0,
+    # Require a resting bid as well as an offer before trusting the quote. Near
+    # the end of a round the favourite's book routinely goes offer-only, so this
+    # is the difference between "conservative" and "never trades in the last 30
+    # seconds". An offer with no bid is still executable; the depth and quote-age
+    # gates above still apply to it either way. Leave True unless the logs show
+    # book_no_bids costing you every entry.
+    "crypto_require_two_sided_book": True,
     # Round shape. These markets are fixed 5-minute rounds; a market whose
     # measured duration is outside this band is not one of them and is skipped.
     "crypto_round_duration_seconds": 300,

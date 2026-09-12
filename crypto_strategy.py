@@ -210,6 +210,7 @@ class CryptoStrategy:
             max_quote_age_seconds=cfg["max_quote_age_seconds"],
             min_depth_multiple=cfg["min_ask_depth_multiple"],
             now=now,
+            require_two_sided=cfg["require_two_sided_book"],
         )
         if ask is None:
             return False, book_reason, book_detail, 0.0

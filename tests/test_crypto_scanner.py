@@ -102,7 +102,8 @@ print("PASS non-live markets are refused without touching the order book")
 # 6. Order-book health: one-sided, wide, stale and thin books are all refused.
 base = make_market(asset="btc", seconds_left=20, prices=(0.95, 0.05))
 for book, expected in [
-    (FakeBook(one_sided="no_bids"), cm.REASON_BOOK_ONE_SIDED),
+    (FakeBook(one_sided="no_asks"), cm.REASON_BOOK_NO_ASKS),
+    (FakeBook(one_sided="no_bids"), cm.REASON_BOOK_NO_BIDS),
     (FakeBook(best_bid=0.50, best_ask=0.95), cm.REASON_BOOK_WIDE_SPREAD),
     (FakeBook(best_bid=0.94, best_ask=0.95, timestamp=NOW - timedelta(seconds=120)), cm.REASON_BOOK_STALE),
     (FakeBook(best_bid=0.94, best_ask=0.95, ask_size=1.0), cm.REASON_BOOK_THIN),
@@ -115,7 +116,25 @@ for book, expected in [
 _client, result = scan([base], {"tok-up": FakeBook(best_bid=0.94, best_ask=0.95),
                                 "tok-down": FakeBook(best_ask=0.05)})
 assert len(result.opportunities) == 1, result.skipped
-print("PASS one-sided / wide / stale / thin books are refused, a healthy one is not")
+print("PASS no-asks / no-bids / wide / stale / thin books are refused, a healthy one is not")
+
+# 6b. An offer with no bid is refused by default but IS executable, so it can be
+#     accepted deliberately -- near the end of a round the favourite's book
+#     routinely goes offer-only, which is when this strategy wants to trade.
+offer_only = {"tok-up": FakeBook(one_sided="no_bids", best_ask=0.95),
+              "tok-down": FakeBook(best_ask=0.05)}
+_client, result = scan([base], offer_only)
+assert result.opportunities == [] and cm.REASON_BOOK_NO_BIDS in reasons(result), reasons(result)
+_client, result = scan([base], offer_only, crypto_require_two_sided_book=False)
+assert len(result.opportunities) == 1, (result.opportunities, reasons(result))
+assert result.opportunities[0].confirmed_price == 0.95
+assert result.opportunities[0].best_bid is None
+# An empty ASK side is never tradable, two-sidedness setting or not: there is
+# nothing being offered to buy.
+_client, result = scan([base], {"tok-up": FakeBook(one_sided="no_asks"), "tok-down": FakeBook(best_ask=0.05)},
+                       crypto_require_two_sided_book=False)
+assert result.opportunities == [] and cm.REASON_BOOK_NO_ASKS in reasons(result), reasons(result)
+print("PASS an offer with no bid is refused by default and tradable when allowed; no offer never is")
 
 # 7. The entry ceiling keeps the bot out of fills with no profit left in them.
 _client, result = scan([base], {"tok-up": FakeBook(best_bid=0.999, best_ask=1.0),

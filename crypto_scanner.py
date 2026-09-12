@@ -30,7 +30,8 @@ from crypto_markets import (
     REASON_ALREADY_TRADED,
     REASON_BELOW_MIN_LIQUIDITY,
     REASON_BELOW_MIN_VOLUME,
-    REASON_BOOK_ONE_SIDED,
+    REASON_BOOK_NO_ASKS,
+    REASON_BOOK_NO_BIDS,
     REASON_BOOK_STALE,
     REASON_BOOK_THIN,
     REASON_BOOK_WIDE_SPREAD,
@@ -157,6 +158,7 @@ def crypto_settings(settings_override: Optional[Dict[str, Any]] = None) -> Dict[
         "max_spread": float(_get("crypto_max_spread")),
         "max_quote_age_seconds": float(_get("crypto_max_quote_age_seconds")),
         "min_ask_depth_multiple": float(_get("crypto_min_ask_depth_multiple")),
+        "require_two_sided_book": bool(_get("crypto_require_two_sided_book")),
         "round_duration_seconds": float(_get("crypto_round_duration_seconds")),
         "round_duration_tolerance_seconds": float(_get("crypto_round_duration_tolerance_seconds")),
         "discovery_lookahead_seconds": float(_get("crypto_discovery_lookahead_seconds")),
@@ -174,6 +176,7 @@ def evaluate_book(
     max_quote_age_seconds: float,
     min_depth_multiple: float,
     now: Optional[datetime] = None,
+    require_two_sided: bool = True,
 ) -> Tuple[Optional[float], str, str, Dict[str, Any]]:
     """Judges a live CLOB book and returns (executable_ask, reason, detail, info).
 
@@ -185,17 +188,32 @@ def evaluate_book(
 
     bids = getattr(order_book, "bids", None) or []
     asks = getattr(order_book, "asks", None) or []
-    if not bids or not asks:
-        return None, REASON_BOOK_ONE_SIDED, "book is missing a bid or an ask side", info
+    # These two are very different situations and must not be logged as one:
+    # an empty ask side means there is literally nothing offered to buy, while a
+    # book that is offered but unbid is executable and only fails the
+    # two-sidedness sanity check. Near the end of a round the favourite's book
+    # routinely goes one-sided, so the log has to say which way.
+    if not asks:
+        return None, REASON_BOOK_NO_ASKS, "nothing offered on this side; there is nothing to buy", info
+    if not bids and require_two_sided:
+        best_ask_only = float(asks[-1].price)
+        return None, REASON_BOOK_NO_BIDS, (
+            f"offered at {best_ask_only:.4f} but nothing bid, so the quote cannot be "
+            f"sanity-checked against a two-sided market"
+        ), info
 
     # SDK documents bids ascending (best last) and asks descending (best last).
-    best_bid = float(bids[-1].price)
+    # Confirmed against the live CLOB on a complementary pair: Up ask 0.48 plus
+    # Down bid 0.52 sums to exactly 1.00, which only holds with this ordering.
+    best_bid = float(bids[-1].price) if bids else None
     best_ask = float(asks[-1].price)
     ask_size = float(getattr(asks[-1], "size", 0.0) or 0.0)
-    spread = best_ask - best_bid
+    spread = (best_ask - best_bid) if best_bid is not None else None
     info.update({"best_bid": best_bid, "best_ask": best_ask, "ask_size": ask_size, "spread": spread})
 
-    if max_spread > 0 and spread > max_spread:
+    # With no bid there is no spread to measure; the depth and freshness gates
+    # below still apply, so the offer is not accepted unchecked.
+    if spread is not None and max_spread > 0 and spread > max_spread:
         return None, REASON_BOOK_WIDE_SPREAD, f"spread {spread:.4f} > {max_spread:.4f}", info
 
     timestamp = getattr(order_book, "timestamp", None)
@@ -434,6 +452,7 @@ def _evaluate_round(
             max_quote_age_seconds=cfg["max_quote_age_seconds"],
             min_depth_multiple=cfg["min_ask_depth_multiple"],
             now=now,
+            require_two_sided=cfg["require_two_sided_book"],
         )
         if ask is None:
             _skip(book_reason, book_detail, side=side)
