@@ -253,6 +253,8 @@ class AccountSession:
                     "token_id": str(p.asset_id or ""),
                     "event_id": str(p.event_id or ""),
                     "outcome": str(p.outcome or ""),
+                    "condition_id": str(p.condition_id or ""),
+                    "market_slug": str(p.slug or ""),
                     "size": float(p.size) if p.size is not None else 0.0,
                     "avg_price": float(p.avg_price) if p.avg_price is not None else 0.0,
                     "current_value": float(p.current_value) if p.current_value is not None else 0.0,

@@ -166,19 +166,37 @@ def run():
             for trade in settled:
                 log(f"SETTLED   {trade['question'][:50]!r} [{trade['outcome_label']}] "
                     f"pnl={trade['pnl']:+.2f} ({trade['note']})")
+                
+                # Note: We no longer eagerly redeem CTF collateral here because paper_broker
+                # often settles trades locally before the on-chain CTF contract has actually
+                # resolved, which causes the redemption to fail and be forgotten.
 
-                # If live trading is active and the position won, claim collateral via on-chain CTF redemption
-                if live is not None and trade.get("resolved_price") == 1.0:
-                    trade_acc = trade.get("account_name")
-                    try:
-                        log(f"LIVE REDEEM: Claiming CTF collateral for market {trade['market_id']} ({trade_acc or 'All'})...")
-                        outcome = live.redeem_winning_position(market_id=trade["market_id"], account_name=trade_acc)
-                        tx_hash = getattr(outcome, "transaction_hash", outcome)
-                        log(f"LIVE REDEEM SUCCESS: TxHash={tx_hash}")
-                        broker.add_log(f"Live CTF redeemed [{trade_acc}]: {trade['question'][:40]} | Tx: {tx_hash}")
-                    except Exception as redeem_err:
-                        log(f"LIVE REDEEM ERROR [{trade_acc}]: {redeem_err}")
-                        broker.add_log(f"CTF Redeem failed for {trade['market_id']} [{trade_acc}]: {redeem_err}", level="ERROR")
+            # 1b. Sweep for any on-chain tokens that have become redeemable
+            # This handles all delayed resolutions properly.
+            if live is not None:
+                try:
+                    for acc in config.get_configured_accounts():
+                        if not acc.get("enabled", True):
+                            continue
+                        acc_name = acc["name"]
+                        live_pos = live.get_live_positions(acc_name)
+                        for p in live_pos:
+                            if p.get("redeemable"):
+                                log(f"LIVE REDEEM SWEEP: Found redeemable CTF position '{p.get('title')}' on {acc_name}...")
+                                try:
+                                    # Provide condition_id explicitly for the CTF redemption
+                                    outcome = live.redeem_winning_position(
+                                        condition_id=p.get("condition_id"),
+                                        market_id=p.get("market_id"), # In case condition_id is missing
+                                        account_name=acc_name
+                                    )
+                                    tx_hash = getattr(outcome, "transaction_hash", outcome)
+                                    log(f"LIVE REDEEM SUCCESS: TxHash={tx_hash}")
+                                    broker.add_log(f"Live CTF sweep redeemed [{acc_name}]: '{p.get('title', '')[:40]}' | Tx: {tx_hash}")
+                                except Exception as e:
+                                    log(f"LIVE REDEEM SWEEP ERROR [{acc_name}]: {e}")
+                except Exception as e:
+                    log(f"Error checking live positions for redemption: {e}")
 
             # 2. Check if paused (unless manual scan is triggered)
             if status == "PAUSED" and not manual_trigger:
