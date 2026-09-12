@@ -460,7 +460,15 @@ def estimate_remaining_minutes(event: Any, allow_worst_case: bool = True) -> Tim
 class SportSettings:
     """Effective Late Game settings for one sport, after per-sport overrides."""
     enabled: bool = True
-    allow_worst_case: bool = True
+    # Sports with no in-period clock (NBA quarters, NHL periods) are estimated by
+    # assuming the whole current period remains. Off by default: the strategy trades
+    # where the timing is known and skips where it is not, rather than trading on a
+    # bound that is correct but far too wide to be useful.
+    allow_worst_case: bool = False
+    # Strictest form of the same rule: accept only a sport that publishes a real
+    # in-play clock (soccer). Esports, whose remaining time is counted in maps rather
+    # than read off a clock, is skipped too.
+    require_clock: bool = False
     max_remaining_minutes: float = 30.0
     max_remaining_fraction: float = 0.34
 
@@ -469,7 +477,8 @@ def sport_settings(code: str, settings: Dict[str, Any]) -> SportSettings:
     """Global Late Game settings overlaid with this sport's own overrides."""
     effective = SportSettings(
         enabled=True,
-        allow_worst_case=bool(settings.get("late_game_allow_worst_case_periods", True)),
+        allow_worst_case=bool(settings.get("late_game_allow_worst_case_periods", False)),
+        require_clock=bool(settings.get("late_game_require_clock", False)),
         max_remaining_minutes=float(settings.get("late_game_max_remaining_minutes", 30.0)),
         max_remaining_fraction=float(settings.get("late_game_max_remaining_fraction", 0.34)),
     )
@@ -479,6 +488,7 @@ def sport_settings(code: str, settings: Dict[str, Any]) -> SportSettings:
     return SportSettings(
         enabled=bool(overrides.get("enabled", effective.enabled)),
         allow_worst_case=bool(overrides.get("allow_worst_case", effective.allow_worst_case)),
+        require_clock=bool(overrides.get("require_clock", effective.require_clock)),
         max_remaining_minutes=float(overrides.get("max_remaining_minutes",
                                                   effective.max_remaining_minutes)),
         max_remaining_fraction=float(overrides.get("max_remaining_fraction",
@@ -516,6 +526,7 @@ class TimingDecision:
 
 REASON_SPORT_DISABLED = "sport_disabled"
 REASON_TOO_MUCH_TIME = "too_much_time_remaining"
+REASON_NO_CLOCK = "no_game_clock"
 
 
 def evaluate_event_timing(event: Any, settings: Dict[str, Any]) -> TimingDecision:
@@ -532,6 +543,13 @@ def evaluate_event_timing(event: Any, settings: Dict[str, Any]) -> TimingDecisio
     estimate = estimate_remaining_minutes(event, allow_worst_case=cfg.allow_worst_case)
     if not estimate.ok:
         return TimingDecision(False, estimate, None, estimate.reason, estimate.describe())
+
+    if cfg.require_clock and estimate.basis != BASIS_CLOCK:
+        return TimingDecision(
+            False, estimate, None, REASON_NO_CLOCK,
+            f"{code} publishes no in-play game clock (timing was {estimate.basis}); "
+            "skipped because late_game_require_clock is on",
+        )
 
     limit = effective_limit_minutes(estimate, cfg)
     if estimate.remaining_minutes > limit:

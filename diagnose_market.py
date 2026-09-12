@@ -304,7 +304,8 @@ def main():
               "require_high_confidence", "late_game_enabled",
               "late_game_max_remaining_minutes", "late_game_max_remaining_fraction",
               "late_game_min_probability", "late_game_max_probability",
-              "late_game_allow_worst_case_periods", "late_game_sport_rules"):
+              "late_game_allow_worst_case_periods", "late_game_require_clock",
+              "late_game_sport_rules"):
         print(f"  {k:<30} = {s.get(k)!r}")
 
     client = polymarket_client.get_public_client()

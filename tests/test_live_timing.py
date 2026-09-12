@@ -366,3 +366,65 @@ def test_fraction_of_zero_disables_the_proportional_cap():
     decision = evaluate_event_timing(event, settings(late_game_max_remaining_fraction=0))
     assert decision.eligible, decision.describe()
     assert decision.limit_minutes == pytest.approx(30.0)
+
+
+# --- Clock-only policy ------------------------------------------------------------
+#
+# The strategy trades where remaining time is actually known and skips where it is
+# not, rather than acting on a bound that is technically correct but far too wide.
+
+def test_shipped_defaults_skip_sports_with_no_in_period_clock():
+    import settings_manager
+    shipped = dict(settings_manager.DEFAULT_SETTINGS)
+    for sport, period in (("nba", "Q4"), ("nhl", "P3"), ("nfl", "Q4"), ("cfb", "Q4")):
+        decision = evaluate_event_timing(make_event(sport, period=period), shipped)
+        assert not decision.eligible, f"{sport} should be skipped by default"
+        assert decision.reason == live_timing.REASON_TIMING_UNAVAILABLE
+        assert "worst-case estimation is disabled" in decision.detail
+
+
+def test_shipped_defaults_still_trade_a_sport_with_a_real_clock():
+    import settings_manager
+    shipped = dict(settings_manager.DEFAULT_SETTINGS)
+    event = make_event("kor", period="2H", elapsed="82", tags=TAGS_SOCCER)
+    assert evaluate_event_timing(event, shipped).eligible
+
+
+def test_worst_case_can_be_switched_back_on_per_sport():
+    # Opting one sport back in stays possible without touching the global switch.
+    event = make_event("nba", period="Q4")
+    opted_in = settings(late_game_allow_worst_case_periods=False,
+                        late_game_sport_rules={"nba": {"allow_worst_case": True}})
+    assert evaluate_event_timing(event, opted_in).eligible
+
+
+def test_require_clock_skips_esports_which_is_counted_not_clocked():
+    event = make_event("cs2", period="3/3", score="6-1|1-1|Bo3", tags=TAGS_ESPORTS,
+                       end_date_offset=timedelta(hours=6))
+    permissive = settings(late_game_max_remaining_minutes=60,
+                          late_game_max_remaining_fraction=0)
+    assert evaluate_event_timing(event, permissive).eligible
+
+    strict = settings(late_game_max_remaining_minutes=60,
+                      late_game_max_remaining_fraction=0,
+                      late_game_require_clock=True)
+    decision = evaluate_event_timing(event, strict)
+    assert not decision.eligible
+    assert decision.reason == live_timing.REASON_NO_CLOCK
+    assert "no in-play game clock" in decision.detail
+
+
+def test_require_clock_still_allows_soccer():
+    event = make_event("kor", period="2H", elapsed="82", tags=TAGS_SOCCER)
+    decision = evaluate_event_timing(event, settings(late_game_require_clock=True))
+    assert decision.eligible
+    assert decision.estimate.basis == live_timing.BASIS_CLOCK
+
+
+def test_require_clock_can_be_relaxed_for_one_sport():
+    event = make_event("cs2", period="3/3", score="6-1|1-1|Bo3", tags=TAGS_ESPORTS)
+    relaxed = settings(late_game_require_clock=True,
+                       late_game_max_remaining_minutes=60,
+                       late_game_sport_rules={"cs2": {"require_clock": False,
+                                                      "max_remaining_fraction": 0}})
+    assert evaluate_event_timing(event, relaxed).eligible

@@ -56,10 +56,16 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # is enabled these replace price_min/price_max so the configured band is the band.
     "late_game_min_probability": 0.90,
     "late_game_max_probability": 0.99,
-    # Sports with no in-period clock (NBA quarters, NHL periods) are estimated by
-    # assuming the whole current period is still to play. Turn this off to skip those
-    # sports instead of estimating them.
-    "late_game_allow_worst_case_periods": True,
+    # Sports with no in-period clock (NBA quarters, NHL periods) publish nothing that
+    # says how far into the period play has got. Off by default: trade where the
+    # remaining time is actually known, skip where it is not. Turning this on falls
+    # back to assuming the whole current period remains -- correct, but a bound wide
+    # enough that those sports only qualify once the limit is raised to match.
+    "late_game_allow_worst_case_periods": False,
+    # Strictest form of the same rule: accept only sports that publish a real in-play
+    # clock (soccer). Esports, timed by counting remaining maps rather than reading a
+    # clock, is skipped as well.
+    "late_game_require_clock": False,
     # Per-sport overrides keyed by sport code, e.g.
     #   {"nfl": {"max_remaining_minutes": 45}, "nhl": {"enabled": False}}
     # Recognised keys: enabled, allow_worst_case, max_remaining_minutes,

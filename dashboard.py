@@ -760,12 +760,21 @@ with st.sidebar:
                 step=0.005,
                 format="%.3f",
             )
+            late_game_require_clock = st.checkbox(
+                "Only trade sports with a real game clock",
+                value=bool(settings.get("late_game_require_clock", False)),
+                help="Strictest timing rule: trade only where an in-play clock is "
+                     "published (soccer). Esports, timed by counting remaining maps "
+                     "rather than reading a clock, is skipped too.",
+            )
             late_game_worst_case = st.checkbox(
                 "Estimate sports with no in-period clock",
-                value=bool(settings.get("late_game_allow_worst_case_periods", True)),
-                help="NBA quarters and NHL periods publish no clock. When on, the "
-                     "whole current period is assumed to remain (never enters early). "
-                     "When off, those sports are skipped instead.",
+                value=bool(settings.get("late_game_allow_worst_case_periods", False)),
+                help="NBA quarters and NHL periods publish no clock, so these sports "
+                     "are skipped by default. Turning this on assumes the whole "
+                     "current period remains -- never enters early, but the estimate "
+                     "is wide enough that those sports need a raised minute cap "
+                     "before they can qualify.",
             )
             late_game_rules_text = st.text_area(
                 "Per-sport overrides (JSON)",
@@ -860,6 +869,7 @@ with st.sidebar:
                 "late_game_min_probability": float(late_game_min_prob),
                 "late_game_max_probability": float(late_game_max_prob),
                 "late_game_allow_worst_case_periods": late_game_worst_case,
+                "late_game_require_clock": late_game_require_clock,
                 "late_game_sport_rules": _parse_sport_rules(
                     late_game_rules_text, settings.get("late_game_sport_rules", {})),
                 "tracked_wallet_address": tracked_wallet.strip(),

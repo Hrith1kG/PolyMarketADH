@@ -98,7 +98,7 @@ add their own fixed allowances. `SUS` (suspended) and `NS` (not started) are **n
 timing states — they are skipped with a reason, as is a `2H` with a missing or
 non-numeric `elapsed`.
 
-### Period sports with no in-period clock — conservative worst case (`PERIOD`)
+### Period sports with no in-period clock — skipped by default (`PERIOD`)
 
 `nba`, `wnba`, `ncaab`, `nfl`, `cfb`, `nhl`. `period` gives `Q1`–`Q4` / `P1`–`P3` /
 `H1`–`H2` / `OT`, and there is no clock within the period. The estimate therefore
@@ -116,11 +116,15 @@ limit is raised for it.
 | `cfb` | 4 × Q | 47 | 20 at half | ~210 |
 | `nhl` | 3 × P | 40 | 18 between | ~150 |
 
-Worst case in the final period is thus 30 (NBA), 42 (NFL), 40 (NHL) wall minutes. At
-a 30-minute absolute limit only NBA clears, which is why each sport carries its own
-overridable `max_remaining_minutes` (see configuration below).
+Worst case in the final period is thus 30 (NBA), 42 (NFL), 40 (NHL) wall minutes — a
+bound that is correct but too wide to act on at a 30-minute limit.
 
-Setting `allow_worst_case` to false for a sport makes it skip instead of estimating.
+**These sports are therefore skipped by default**
+(`late_game_allow_worst_case_periods = False`). The strategy trades where the
+remaining time is genuinely known and skips where it is not. Turning the setting on,
+globally or for one sport, falls back to the worst-case estimate above, which then
+also needs that sport's `max_remaining_minutes` raised past its final-period length
+before anything can qualify.
 
 ### Esports — series position (`SERIES`)
 
@@ -179,6 +183,14 @@ recognisable inning period appears.
 `SUS`, `POSTP`, `CANC`, `INT`, `DELAY` → not currently playing. All are skipped with
 their own reason rather than being read as "almost finished".
 
+### Clock-only mode
+
+`late_game_require_clock` is the strictest form of the same policy: only a sport that
+publishes a real in-play clock is accepted, which today means soccer alone. Esports is
+skipped under it as well — its remaining time is counted in maps, not read off a
+clock. It is off by default, so esports trades unless you turn it on. Like every other
+timing control it can be relaxed for a single sport through `late_game_sport_rules`.
+
 ## How the limit is applied
 
 The user-facing rule is one threshold, but a fixed minute count means different things
@@ -207,12 +219,14 @@ late_game_max_remaining_minutes = 30.0 # absolute wall-clock cap
 late_game_max_remaining_fraction = 0.34 # proportional cap; 0 disables
 late_game_min_probability = 0.90       # entry band floor
 late_game_max_probability = 0.99       # entry band ceiling
-late_game_allow_worst_case_periods = True  # global switch for PERIOD sports
+late_game_allow_worst_case_periods = False  # estimate clockless period sports?
+late_game_require_clock = False        # accept only sports with a real clock
 late_game_sport_rules = {}             # per-sport overrides
 ```
 
 Per-sport overrides are keyed by sport code and may set `enabled`,
-`allow_worst_case`, `max_remaining_minutes` and `max_remaining_fraction`:
+`allow_worst_case`, `require_clock`, `max_remaining_minutes` and
+`max_remaining_fraction`:
 
 ```json
 {
@@ -246,6 +260,7 @@ Every rejected candidate is logged with a machine-readable reason, surfaced thro
 | `sport_unsupported` | no rule for this sport code; names the code and period |
 | `timing_unavailable` | rule exists but this state yields no reliable estimate |
 | `too_much_time_remaining` | estimate exceeds the effective limit |
+| `no_game_clock` | clock-only mode is on and this sport publishes no in-play clock |
 | `probability_out_of_band` | token price outside the configured band |
 | `market_filtered` | wrong market type, closed, or not accepting orders |
 | `liquidity_or_volume` | below the liquidity/volume floors |
