@@ -41,6 +41,7 @@ from crypto_markets import (
     REASON_NOT_LIVE,
     REASON_PRICE_ABOVE_CEILING,
     REASON_PRICE_BELOW_THRESHOLD,
+    REASON_BINANCE_STOPLOSS,
     SIDE_DOWN,
     SIDE_UP,
 )
@@ -94,6 +95,7 @@ class CryptoOpportunity:
     net_edge_per_share: float = 0.0
     tick_size: Optional[float] = None
     min_order_size: Optional[float] = None
+    strike_price: Optional[float] = None
     strategy: str = "crypto_5m"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -173,6 +175,10 @@ def crypto_settings(settings_override: Optional[Dict[str, Any]] = None) -> Dict[
         "discovery_page_size": int(_get("crypto_discovery_page_size")),
         "discovery_max_pages": int(_get("crypto_discovery_max_pages")),
         "order_type": str(_get("crypto_order_type") or "LIMIT").upper(),
+        "maker_mode": _get("crypto_maker_mode") if isinstance(_get("crypto_maker_mode"), bool) else str(_get("crypto_maker_mode") or "").lower() in ("true", "1", "yes"),
+        "maker_cancel_seconds": max(0, int(float(_get("crypto_maker_cancel_seconds") if _get("crypto_maker_cancel_seconds") is not None else 4))),
+        "binance_stoploss": _get("crypto_binance_stoploss") if isinstance(_get("crypto_binance_stoploss"), bool) else str(_get("crypto_binance_stoploss") if _get("crypto_binance_stoploss") is not None else "true").lower() in ("true", "1", "yes"),
+        "crypto_binance_stoploss": _get("crypto_binance_stoploss") if isinstance(_get("crypto_binance_stoploss"), bool) else str(_get("crypto_binance_stoploss") if _get("crypto_binance_stoploss") is not None else "true").lower() in ("true", "1", "yes"),
     }
 
 
@@ -571,6 +577,7 @@ def _evaluate_round(
             net_edge_per_share=net_edge,
             tick_size=constraints.tick_size,
             min_order_size=constraints.min_order_size,
+            strike_price=getattr(round_, "strike_price", None),
         ))
         if log:
             log(

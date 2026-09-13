@@ -144,3 +144,7 @@ def test_broad_scan_widens_the_late_game_band_not_price_min(monkeypatch):
     # The standard-mode keys are untouched, so turning Late Game off does not
     # inherit a band that was only ever meant for the live-game scan.
     assert broad["price_min"] == settings_manager.DEFAULT_SETTINGS["price_min"]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__]))

@@ -240,6 +240,82 @@ class AccountSession:
             print(f"[live_broker][{self.name}] Failed to list open orders: {exc}")
             return []
 
+    def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Queries for a specific order by id for this account."""
+        try:
+            try:
+                order = self.client.get_order(order_id=str(order_id))
+            except TypeError:
+                order = self.client.get_order(str(order_id))
+            if order:
+                if isinstance(order, dict):
+                    return {
+                        "account": self.name,
+                        "wallet": self.wallet,
+                        "id": str(order.get("id", "")),
+                        "market": str(order.get("market", "")),
+                        "token_id": str(order.get("asset_id") or order.get("token_id", "")),
+                        "side": str(order.get("side", "")),
+                        "price": float(order.get("price", 0.0) or 0.0),
+                        "size": float(order.get("original_size") or order.get("size", 0.0) or 0.0),
+                        "filled": float(order.get("size_matched") or order.get("filled", 0.0) or 0.0),
+                        "status": str(order.get("status", "")).lower() if order.get("status") else None,
+                        "created_at": str(order.get("created_at", "")),
+                    }
+                original_size = getattr(order, "original_size", None)
+                if original_size is None:
+                    original_size = getattr(order, "size", 0.0)
+                size_matched = getattr(order, "size_matched", None)
+                if size_matched is None:
+                    size_matched = getattr(order, "filled", 0.0)
+                price_val = getattr(order, "price", 0.0)
+                return {
+                    "account": self.name,
+                    "wallet": self.wallet,
+                    "id": str(getattr(order, "id", "")),
+                    "market": str(getattr(order, "market", "")),
+                    "token_id": str(getattr(order, "asset_id", None) or getattr(order, "token_id", "") or ""),
+                    "side": str(getattr(order, "side", "")),
+                    "price": float(price_val) if price_val is not None else 0.0,
+                    "size": float(original_size or 0.0),
+                    "filled": float(size_matched or 0.0),
+                    "status": str(order.status).lower() if getattr(order, "status", None) else None,
+                    "created_at": str(getattr(order, "created_at", "")),
+                }
+        except Exception:
+            pass
+
+        try:
+            for order in self.get_open_orders():
+                o_id = order.get("id") if isinstance(order, dict) else getattr(order, "id", None)
+                if o_id is not None and str(o_id) == str(order_id):
+                    if isinstance(order, dict):
+                        return order
+                    original_size = getattr(order, "original_size", None)
+                    if original_size is None:
+                        original_size = getattr(order, "size", 0.0)
+                    size_matched = getattr(order, "size_matched", None)
+                    if size_matched is None:
+                        size_matched = getattr(order, "filled", 0.0)
+                    price_val = getattr(order, "price", 0.0)
+                    return {
+                        "account": self.name,
+                        "wallet": self.wallet,
+                        "id": str(getattr(order, "id", "")),
+                        "market": str(getattr(order, "market", "")),
+                        "token_id": str(getattr(order, "asset_id", None) or getattr(order, "token_id", "") or ""),
+                        "side": str(getattr(order, "side", "")),
+                        "price": float(price_val) if price_val is not None else 0.0,
+                        "size": float(original_size or 0.0),
+                        "filled": float(size_matched or 0.0),
+                        "status": str(order.status).lower() if getattr(order, "status", None) else None,
+                        "created_at": str(getattr(order, "created_at", "")),
+                    }
+            return None
+        except Exception as exc:
+            print(f"[live_broker][{self.name}] Failed to get order {order_id}: {exc}")
+            return None
+
     def get_live_positions(self) -> List[Dict[str, Any]]:
         """Queries on-chain positions for this account."""
         try:
@@ -465,6 +541,8 @@ def _buy_result(session: "AccountSession", stake: float, outcome: Optional[Dict[
             "order_id": None,
             "response": None,
             "error": error,
+            "requested_size": 0.0,
+            "requested_stake": float(stake),
         }
     outcome = outcome or {}
     filled = bool(outcome.get("filled")) and float(outcome.get("filled_size", 0.0)) > 0.0
@@ -489,6 +567,8 @@ def _buy_result(session: "AccountSession", stake: float, outcome: Optional[Dict[
         "amounts_unavailable": bool(outcome.get("amounts_unavailable")),
         "response": outcome.get("raw"),
         "error": err,
+        "requested_size": outcome.get("requested_size"),
+        "requested_stake": outcome.get("requested_stake", float(stake)),
     }
 
 
@@ -571,6 +651,17 @@ class LiveBroker:
         for s in self.account_list:
             all_orders.extend(s.get_open_orders())
         return all_orders
+
+    def get_order(self, order_id: str, account_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Queries for a specific open order by id across one or all accounts."""
+        if account_name:
+            session = self.get_session(account_name)
+            return session.get_order(order_id) if session else None
+        for s in self.account_list:
+            ord_info = s.get_order(order_id)
+            if ord_info:
+                return ord_info
+        return None
 
     def get_live_positions(self, account_name: Optional[str] = None) -> List[Dict[str, Any]]:
         if account_name:

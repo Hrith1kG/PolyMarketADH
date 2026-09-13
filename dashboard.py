@@ -985,6 +985,25 @@ with st.sidebar:
                 value=float(settings.get("crypto_min_ask_depth_multiple", 1.0)),
                 step=0.25,
             )
+            st.markdown("**Crypto Order Execution**")
+            crypto_maker = st.checkbox(
+                "Maker Mode (bid at best_bid + 0.01)",
+                value=bool(settings.get("crypto_maker_mode", True)),
+                help="When enabled, places limit bids inside the spread instead of crossing the book as taker.",
+            )
+            crypto_maker_cancel = st.number_input(
+                "Maker Auto-Cancel Delay (seconds)",
+                min_value=0,
+                max_value=30,
+                value=max(0, int(float(settings.get("crypto_maker_cancel_seconds", 4)))),
+                step=1,
+                help="Unfilled maker orders will be cancelled after this delay.",
+            )
+            crypto_binance_stoploss = st.checkbox(
+                "Binance Spot Oracle Stop-Loss",
+                value=bool(settings.get("crypto_binance_stoploss", True)),
+                help="Pre-trade Oracle front-running: aborts UP trades if Binance spot is below strike price, and DOWN trades if Binance spot is above strike price.",
+            )
 
         with sb_tab_wallet:
             st.markdown("**👛 Wallet Tracking (Data API)**")
@@ -1041,6 +1060,9 @@ with st.sidebar:
                 "crypto_max_spread": float(crypto_spread),
                 "crypto_max_quote_age_seconds": float(crypto_quote_age),
                 "crypto_min_ask_depth_multiple": float(crypto_depth),
+                "crypto_maker_mode": crypto_maker,
+                "crypto_maker_cancel_seconds": int(crypto_maker_cancel),
+                "crypto_binance_stoploss": crypto_binance_stoploss,
             }
             settings.update(updated_settings)
             settings_manager.save_settings(settings)

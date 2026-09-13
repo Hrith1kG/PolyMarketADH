@@ -337,3 +337,7 @@ def test_rejection_summary_counts_reasons(monkeypatch):
     summary = scanner.rejection_summary()
     assert summary.get("not_live") == 1
     assert summary.get("probability_out_of_band", 0) >= 1
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__]))

@@ -23,10 +23,12 @@ a scan and an order, a five-minute round can change completely.
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import config
@@ -45,6 +47,7 @@ from crypto_markets import (
     REASON_PRICE_BELOW_THRESHOLD,
     REASON_RISK_BLOCKED,
     REASON_SLIPPAGE,
+    REASON_BINANCE_STOPLOSS,
 )
 
 # How long the same (round, reason) skip message is suppressed for. At a
@@ -67,6 +70,22 @@ class CryptoPassResult:
     reasons: List[str] = field(default_factory=list)
 
 
+def _order_attr(order: Any, *keys: str, default: Any = None) -> Any:
+    """Safely extracts an attribute or dict key from an order object or mapping."""
+    if order is None:
+        return default
+    if isinstance(order, dict):
+        for k in keys:
+            if k in order and order[k] is not None:
+                return order[k]
+        return default
+    for k in keys:
+        val = getattr(order, k, None)
+        if val is not None:
+            return val
+    return default
+
+
 class CryptoStrategy:
     """The crypto side of the bot. Holds no sports state and reads no sports setting."""
 
@@ -76,6 +95,8 @@ class CryptoStrategy:
         client: Any = None,
         live_provider: Optional[Callable[[], Any]] = None,
         log: Optional[Callable[[str], None]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        binance_client: Any = None,
     ):
         self.broker = broker
         self._client = client
@@ -83,6 +104,9 @@ class CryptoStrategy:
         self._log = log or (lambda msg: print(msg))
         self._skip_log_seen: Dict[str, float] = {}
         self._stop = threading.Event()
+        self._sleep = sleep_fn or time.sleep
+        self._binance_client = binance_client
+        self._binance_price_cache: Dict[str, Tuple[float, float]] = {}
 
     # --- plumbing ---------------------------------------------------------
 
@@ -154,6 +178,161 @@ class CryptoStrategy:
         if today >= cfg["max_trades_per_day"]:
             return False, f"crypto max trades per day reached ({today}/{cfg['max_trades_per_day']})"
         return True, ""
+
+    # --- Binance oracle stop-loss (Hack 2/4) -----------------------------
+
+    def _get_binance_spot_price(
+        self,
+        asset: str,
+        max_timeout: Optional[float] = None,
+        allow_fallback: bool = True,
+    ) -> Optional[float]:
+        """Fetches the real-time spot price for asset, cached for up to 2 seconds."""
+        norm_asset = (asset or "").strip().upper()
+        if not norm_asset:
+            return None
+        now_ts = time.monotonic()
+        cached = self._binance_price_cache.get(norm_asset)
+        # Check cache: valid for 2.0s for successful price, or 1.5s for negative cache / failure
+        if cached is not None:
+            cached_val, cached_ts = cached
+            ttl = 2.0 if cached_val is not None else 1.5
+            if (now_ts - cached_ts) < ttl:
+                return cached_val
+
+        price = None
+        try:
+            if self._binance_client is not None:
+                if hasattr(self._binance_client, "get_spot_price"):
+                    try:
+                        price = self._binance_client.get_spot_price(
+                            norm_asset, timeout=max_timeout, allow_fallback=allow_fallback
+                        )
+                    except TypeError:
+                        price = self._binance_client.get_spot_price(norm_asset)
+                elif callable(self._binance_client):
+                    price = self._binance_client(norm_asset)
+            else:
+                import binance_client
+                price = binance_client.get_binance_spot_price(
+                    norm_asset, timeout=max_timeout, allow_fallback=allow_fallback
+                )
+        except Exception as exc:
+            self.log_skip(
+                f"[crypto] Warning: Binance spot price fetch failed for {norm_asset}: {exc}",
+                throttle_key=f"binance_fetch_err:{norm_asset}",
+            )
+            price = None
+
+        if price is not None:
+            try:
+                val = float(price)
+                if math.isfinite(val) and val > 0:
+                    self._binance_price_cache[norm_asset] = (val, now_ts)
+                    return val
+            except (ValueError, TypeError):
+                pass
+
+        # Negative cache: store (None, now_ts) so immediate retries within TTL do not re-stall execution
+        self._binance_price_cache[norm_asset] = (None, now_ts)
+        return None
+
+    def check_binance_stoploss(
+        self,
+        opp: Any,
+        cfg: Dict[str, Any],
+        market: Any = None,
+        round_: Any = None,
+    ) -> Tuple[bool, str, str]:
+        """Pre-trade Oracle front-running check against Binance spot price.
+
+        Extracts strike_price from market / question / opp.
+        If buying UP and Binance spot price < strike_price, aborts immediately.
+        If buying DOWN and Binance spot price > strike_price, aborts immediately.
+        Returns (ok, reason, detail).
+        """
+        stoploss_enabled = cfg.get("crypto_binance_stoploss", cfg.get("binance_stoploss", True))
+        if not stoploss_enabled:
+            return True, "", "binance stoploss disabled"
+
+        # Resolve strike price from opp, round, or market using get_market_strike_price
+        strike_price = crypto_markets.get_market_strike_price(opp)
+        if strike_price is None and round_ is not None:
+            strike_price = crypto_markets.get_market_strike_price(round_)
+        if strike_price is None and market is not None:
+            strike_price = crypto_markets.get_market_strike_price(market)
+
+        if strike_price is None or strike_price <= 0:
+            return True, "", "no strike price found"
+
+        def _get_val(obj: Any, key: str, default: Any = "") -> Any:
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        asset = _get_val(opp, "asset") or (_get_val(round_, "asset") if round_ else "")
+        if not asset:
+            return True, "", "no asset symbol found"
+
+        # Dynamically bound timeout and secondary fallback based on remaining seconds
+        remaining = None
+        if round_ is not None and hasattr(round_, "seconds_remaining"):
+            try:
+                remaining = float(round_.seconds_remaining())
+            except Exception:
+                pass
+        if remaining is None:
+            rem_val = _get_val(opp, "seconds_remaining", None)
+            if rem_val is not None:
+                try:
+                    remaining = float(rem_val)
+                except (ValueError, TypeError):
+                    pass
+
+        max_timeout = None
+        allow_fallback = True
+        if remaining is not None and remaining > 0:
+            if remaining <= 2.5:
+                max_timeout = 0.6
+                allow_fallback = False
+            elif remaining <= 5.0:
+                max_timeout = 1.0
+                allow_fallback = False
+
+        spot_price = self._get_binance_spot_price(
+            asset, max_timeout=max_timeout, allow_fallback=allow_fallback
+        )
+        if spot_price is None:
+            self.log_skip(
+                f"[crypto] Warning: Binance spot price unavailable for {asset}; proceeding",
+                throttle_key=f"binance_price_unavail:{asset}",
+            )
+            return True, "", "binance price unavailable"
+
+        raw_side = _get_val(opp, "side") or _get_val(opp, "outcome_label")
+        side = str(raw_side or "").upper()
+
+        def _fmt(val: float) -> str:
+            return f"{val:.2f}" if val >= 1.0 else f"{val:.6g}"
+
+        if side in ("UP", "YES", "OVER", "ABOVE", "HIGHER") and spot_price < strike_price:
+            detail = (
+                f"Binance spot price {_fmt(spot_price)} < strike price {_fmt(strike_price)} "
+                f"for UP trade ({asset})"
+            )
+            return False, REASON_BINANCE_STOPLOSS, detail
+        elif side in ("DOWN", "NO", "UNDER", "BELOW", "LOWER") and spot_price > strike_price:
+            detail = (
+                f"Binance spot price {_fmt(spot_price)} > strike price {_fmt(strike_price)} "
+                f"for DOWN trade ({asset})"
+            )
+            return False, REASON_BINANCE_STOPLOSS, detail
+
+        return True, "", (
+            f"Binance spot {_fmt(spot_price)} valid for {side} against strike {_fmt(strike_price)}"
+        )
 
     # --- pre-trade re-check ----------------------------------------------
 
@@ -256,10 +435,36 @@ class CryptoStrategy:
                 f"over the {cfg['max_slippage']:.4f} cap"
             ), 0.0
 
+        # Determine execution price: submit limit orders at best_bid + 0.01 (snapped to tick)
+        # when crypto_maker_mode is active, otherwise take best_ask.
+        best_bid = _info.get("best_bid")
+        maker_mode = bool(cfg.get("maker_mode", True))
+        if maker_mode and best_bid is not None and float(best_bid) > 0:
+            maker_price = float(Decimal(str(round(best_bid, 6))) + Decimal("0.01"))
+            if constraints.tick_size and not crypto_markets.price_on_tick(maker_price, constraints.tick_size):
+                maker_price = crypto_markets.round_down_to_tick(maker_price, constraints.tick_size)
+            max_limit = 1.0 - (constraints.tick_size or 0.01)
+            if maker_price > max_limit:
+                maker_price = max_limit
+            if maker_price > cfg["max_probability"]:
+                return False, REASON_PRICE_ABOVE_CEILING, (
+                    f"maker price {maker_price:.4f} > {cfg['max_probability']:.4f} ceiling at submit time"
+                ), 0.0
+            target_price = maker_price
+        else:
+            target_price = ask
+
+        # Pre-trade Binance Spot Oracle Stop-Loss Check (Hack 2/4)
+        stoploss_ok, stoploss_reason, stoploss_detail = self.check_binance_stoploss(
+            opp, cfg, market=market, round_=round_
+        )
+        if not stoploss_ok:
+            return False, stoploss_reason, stoploss_detail, 0.0
+
         return True, "", (
-            f"{remaining:.1f}s left, executable ask {ask:.4f}, net edge {net_edge:.4f}/share "
-            f"after fees"
-        ), float(ask)
+            f"{remaining:.1f}s left, target price {target_price:.4f} (ask {ask:.4f}, best_bid {best_bid}), "
+            f"net edge {net_edge:.4f}/share after fees"
+        ), float(target_price)
 
     # --- execution --------------------------------------------------------
 
@@ -320,13 +525,23 @@ class CryptoStrategy:
         if not stakes:
             return 0
 
+        stoploss_ok, stoploss_reason, stoploss_detail = self.check_binance_stoploss(opp, cfg)
+        if not stoploss_ok:
+            setattr(opp, "rejection_reason", stoploss_reason)
+            self.log_skip(
+                f"[crypto] ABORT LIVE {opp.asset} {opp.side}: {stoploss_reason} ({stoploss_detail})",
+                throttle_key=f"{opp.round_key}:stoploss:live",
+            )
+            return 0
+
         # For a MARKET order, hand the exchange its own price cap as well. Our
         # pre-trade re-check can only see the book as it was a moment ago;
         # max_price is what actually stops the order crossing further if the
         # book moves between signing and matching.
+        order_type = "LIMIT" if cfg.get("maker_mode", True) else cfg["order_type"]
         results = live.place_buy_selected(
             str(opp.token_id), float(price), stakes,
-            order_type=cfg["order_type"],
+            order_type=order_type,
             max_price=float(price) + max(cfg["max_slippage"], 0.0),
         )
         # "Entered" means an order reached the exchange -- a fill, or an order
@@ -336,6 +551,133 @@ class CryptoStrategy:
         # recording a fill can never report the round as un-entered and let a
         # later poll place a second order against it.
         entered_accounts = sum(1 for res in results if res["success"] or res["resting"])
+
+        maker_mode = bool(cfg.get("maker_mode", True))
+        resting_results = [r for r in results if r.get("resting")]
+
+        # Auto-Cancel Safety Net for resting maker orders
+        if maker_mode and resting_results:
+            cancel_delay = max(0, int(cfg.get("maker_cancel_seconds", 4)))
+            if cancel_delay > 0:
+                self._sleep(cancel_delay)
+
+            for res in resting_results:
+                order_id = res.get("order_id")
+                name = res.get("account_name")
+                if not order_id:
+                    continue
+
+                open_order = None
+                # Check get_order first for direct O(1) order status lookup
+                if hasattr(live, "get_order"):
+                    try:
+                        open_order = live.get_order(order_id, account_name=name)
+                    except Exception as exc:
+                        self.log(f"[crypto] Warning: get_order failed for {order_id} [{name}]: {exc}")
+
+                # Fallback to get_open_orders if needed
+                if open_order is None and hasattr(live, "get_open_orders"):
+                    try:
+                        orders = live.get_open_orders(name) or []
+                        for o in orders:
+                            o_id = _order_attr(o, "id")
+                            if o_id is not None and str(o_id) == str(order_id):
+                                open_order = o
+                                break
+                    except Exception as exc:
+                        self.log(f"[crypto] Warning: get_open_orders failed for {name}: {exc}")
+
+                matched_size = 0.0
+                orig_size = 0.0
+                order_status = ""
+
+                if open_order is not None:
+                    matched_size = float(_order_attr(open_order, "filled", "size_matched", default=0.0) or 0.0)
+                    orig_size = float(_order_attr(open_order, "size", "original_size", default=0.0) or 0.0)
+                    order_status = str(_order_attr(open_order, "status", default="") or "").lower()
+
+                if orig_size <= 0.0:
+                    orig_size = float(res.get("requested_size", 0.0) or 0.0)
+                if orig_size <= 0.0 and price > 0:
+                    orig_size = float(res.get("stake", 0.0)) / price
+
+                # If order already fully matched during the delay, keep it and book full fill
+                if (orig_size > 0.0 and matched_size >= (orig_size - 1e-5)) or order_status in ("matched", "filled"):
+                    res["success"] = True
+                    res["resting"] = False
+                    res["filled_size"] = matched_size if matched_size > 0 else orig_size
+                    res["filled_cost"] = res["filled_size"] * price
+                    res["stake"] = res["filled_cost"]
+                    res["avg_price"] = price
+                    res["status"] = "matched"
+                    res["error"] = None
+                    self.log(f"[crypto] Maker order {order_id} [{name}] fully filled ({res['filled_size']:.2f} shares)")
+                    continue
+
+                # Unfilled or partially filled: issue cancellation request
+                cancel_ok = False
+                cancel_err = ""
+                if hasattr(live, "cancel_order"):
+                    try:
+                        live.cancel_order(order_id, account_name=name)
+                        cancel_ok = True
+                        self.log(f"[crypto] Auto-cancelled maker order {order_id} [{name}] after {cancel_delay}s")
+                    except Exception as exc:
+                        cancel_err = str(exc)
+                        self.log(f"[crypto] Warning: cancel_order failed for {order_id} [{name}]: {exc}")
+
+                # Check if final order status or filled amount updated after cancel
+                if hasattr(live, "get_order"):
+                    try:
+                        updated_order = live.get_order(order_id, account_name=name)
+                        if updated_order is not None:
+                            updated_matched = float(_order_attr(updated_order, "filled", "size_matched", default=0.0) or 0.0)
+                            if updated_matched > matched_size:
+                                matched_size = updated_matched
+                            status_val = _order_attr(updated_order, "status")
+                            if status_val:
+                                order_status = str(status_val).lower()
+                    except Exception:
+                        pass
+
+                # Fallback to initial placement fill if matched_size still 0
+                if matched_size <= 0.0:
+                    matched_size = float(res.get("filled_size", 0.0) or 0.0)
+
+                if (orig_size > 0.0 and matched_size >= (orig_size - 1e-5)) or order_status in ("matched", "filled"):
+                    res["resting"] = False
+                    res["success"] = True
+                    res["filled_size"] = matched_size if matched_size > 0 else orig_size
+                    res["filled_cost"] = res["filled_size"] * price
+                    res["stake"] = res["filled_cost"]
+                    res["avg_price"] = price
+                    res["status"] = "matched"
+                    res["error"] = None
+                elif matched_size > 0.0:
+                    res["resting"] = False
+                    res["success"] = True
+                    res["filled_size"] = matched_size
+                    res["filled_cost"] = matched_size * price
+                    res["stake"] = res["filled_cost"]
+                    res["avg_price"] = price
+                    res["status"] = "matched"
+                    res["error"] = None
+                    self.log(f"[crypto] Partial fill booked [{name}] {matched_size:.2f}/{orig_size:.2f} shares")
+                elif cancel_ok or order_status in ("cancelled", "canceled"):
+                    res["resting"] = False
+                    res["success"] = False
+                    res["filled_size"] = 0.0
+                    res["filled_cost"] = 0.0
+                    res["error"] = f"Maker order auto-cancelled after {cancel_delay}s (unfilled)"
+                    res["cancelled"] = True
+                else:
+                    # Cancel failed and order did not match -- leave resting=True so user/broker knows order is still live on exchange
+                    res["resting"] = True
+                    res["success"] = False
+                    res["filled_size"] = 0.0
+                    res["filled_cost"] = 0.0
+                    res["error"] = f"Auto-cancel failed for maker order {order_id} [{name}] ({cancel_err or 'unknown error'}); order remains resting on exchange"
+
         for res in results:
             try:
                 self._book_result(res, opp)
@@ -384,6 +726,16 @@ class CryptoStrategy:
                 self._broker_log(
                     f"Crypto fill could not be tracked [{name}]: {book_reason}", level="ERROR"
                 )
+        elif res.get("cancelled"):
+            self.broker.record_unfilled()
+            self.log(
+                f"[crypto] LIVE CANCEL [{name}] {opp.asset} {opp.side} -- {res['error']}"
+            )
+            self._broker_log(
+                f"Crypto maker order cancelled unfilled [{name}] (order {res.get('order_id')}): "
+                f"{opp.asset} {opp.side} {opp.slug}.",
+                level="INFO",
+            )
         elif res["resting"]:
             # An order exists against this round even though nothing filled.
             # The round stays claimed so a later poll cannot double it up.
@@ -413,7 +765,16 @@ class CryptoStrategy:
                 throttle_key=f"{opp.round_key}:risk:paper",
             )
             return 0
-        position, why = self.broker.open_position(opp, stake=stake, mode="PAPER")
+        stoploss_ok, stoploss_reason, stoploss_detail = self.check_binance_stoploss(opp, cfg)
+        if not stoploss_ok:
+            setattr(opp, "rejection_reason", stoploss_reason)
+            self.log_skip(
+                f"[crypto] ABORT PAPER {opp.asset} {opp.side}: {stoploss_reason} ({stoploss_detail})",
+                throttle_key=f"{opp.round_key}:stoploss:paper",
+            )
+            return 0
+
+        position, why = self.broker.open_position(opp, stake=stake, fill_price=price, mode="PAPER")
         if position is None:
             self.log_skip(
                 f"[crypto] SKIP {opp.asset} {opp.side}: {why}",
@@ -523,6 +884,10 @@ class CryptoStrategy:
                     entered = self._execute_live(live, opp, price, cfg)
                 else:
                     entered = self._execute_paper(opp, price, cfg)
+
+                if not entered and getattr(opp, "rejection_reason", None):
+                    result.reasons.append(opp.rejection_reason)
+                    result.rejected += 1
             except Exception as exc:
                 self.log(f"[crypto] ERROR entering {opp.asset} {opp.side}: {exc}")
                 self._broker_log(f"Crypto entry error on {opp.asset} {opp.side}: {exc}", level="ERROR")
@@ -571,14 +936,14 @@ class CryptoStrategy:
         self.log("[crypto] Crypto 5-Minute strategy loop stopped.")
 
 
-def start_crypto_thread(broker, log: Optional[Callable[[str], None]] = None) -> Tuple[CryptoStrategy, threading.Thread]:
+def start_crypto_thread(broker, log: Optional[Callable[[str], None]] = None, binance_client: Any = None) -> Tuple[CryptoStrategy, threading.Thread]:
     """Starts the crypto loop on its own daemon thread.
 
     A separate thread is what keeps the two cadences independent: crypto can
     poll every 2-5 seconds for a 30-second window while the sports loop keeps
     its own (much slower) scan interval, with neither waiting on the other.
     """
-    strategy = CryptoStrategy(broker, log=log)
+    strategy = CryptoStrategy(broker, log=log, binance_client=binance_client)
     thread = threading.Thread(target=strategy.run_forever, name="crypto-5m", daemon=True)
     thread.start()
     return strategy, thread

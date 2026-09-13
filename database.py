@@ -95,9 +95,10 @@ def init_db(db_path: str = DB_FILE, force: bool = False) -> None:
     ALTER TABLEs, four CREATE INDEXes and a batch of UPDATEs each time -- pure
     overhead on every dashboard rerun.
     """
-    if not force and db_path in _INITIALISED_DBS:
+    abs_db_path = os.path.abspath(db_path)
+    if not force and abs_db_path in _INITIALISED_DBS:
         return
-    _INITIALISED_DBS.add(db_path)
+    _INITIALISED_DBS.add(abs_db_path)
     with get_connection(db_path) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (

@@ -145,6 +145,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "crypto_discovery_page_size": 100,
     "crypto_discovery_max_pages": 3,
     "crypto_order_type": "LIMIT",      # "LIMIT" or "MARKET"
+    # Maker order settings (Hack 1)
+    "crypto_maker_mode": True,         # When True, submit limit bids at best_bid + 0.01 instead of taking best_ask
+    "crypto_maker_cancel_seconds": 4,  # Seconds to wait before auto-cancelling unfilled maker orders
+    # Binance Spot Oracle Front-Running (Hack 2/4)
+    "crypto_binance_stoploss": True,   # Pre-trade check: abort if Binance spot violates strike price
 }
 
 # Late Game settings that were replaced by the live-state rewrite. They are dropped on

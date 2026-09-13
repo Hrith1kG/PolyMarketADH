@@ -40,6 +40,8 @@ the caller can log exactly why a market was passed over.
 """
 from __future__ import annotations
 
+import html
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -78,6 +80,7 @@ REASON_RISK_BLOCKED = "risk_limit"
 REASON_SLIPPAGE = "slippage"
 REASON_NET_EDGE = "net_edge_below_floor"
 REASON_OFF_TICK = "price_off_tick"
+REASON_BINANCE_STOPLOSS = "binance_stoploss"
 
 SIDE_UP = "UP"
 SIDE_DOWN = "DOWN"
@@ -175,6 +178,145 @@ class MarketRejected(Exception):
         self.detail = detail
 
 
+def extract_strike_price(text: Any) -> Optional[float]:
+    """Extracts the strike price from a market question, title, or text.
+
+    Examples:
+        'BTC > $58,010 at 12:00 PM?' -> 58010.0
+        'ETH > $2,450.50 at 1:30 PM?' -> 2450.5
+        'SOL > $135.50 at 2:00 PM?' -> 135.5
+        'DOGE > $0.1250 at 5:00 PM?' -> 0.125
+        'BTC > 58010 at 12:00 PM?' -> 58010.0
+        'BTC > $95k at 12:00 PM?' -> 95000.0
+        'BTC &gt; 58010 at 12:00 PM?' -> 58010.0
+        'Will BTC reach 5 PM above $58,000?' -> 58000.0
+        'BTC drops to 58,000 at 12:00 PM?' -> 58000.0
+        'PEPE > 1.5e-5 at 12:00 PM?' -> 1.5e-5
+        'BTC > €58,010 at 12:00 PM?' -> 58010.0
+        'BTC ≥ 58,010 at 12:00 PM?' -> 58010.0
+        'BTC Up or Down' -> None
+    """
+    if text is None:
+        return None
+    if isinstance(text, (int, float)):
+        val = float(text)
+        return val if math.isfinite(val) and val > 0 else None
+    if not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    for _ in range(3):
+        unescaped = html.unescape(cleaned)
+        if unescaped == cleaned:
+            break
+        cleaned = unescaped
+    if not cleaned:
+        return None
+
+    def _parse_candidate(num_str: str, mult_str: Optional[str] = None) -> Optional[float]:
+        try:
+            val = float(num_str.replace(",", ""))
+            if mult_str:
+                m = mult_str.lower()
+                if m == "k":
+                    val *= 1_000.0
+                elif m == "m":
+                    val *= 1_000_000.0
+                elif m == "b":
+                    val *= 1_000_000_000.0
+                elif m == "t":
+                    val *= 1_000_000_000_000.0
+            return val if math.isfinite(val) and val > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    num_pat = r"(-?(?:[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)(?:[eE][+-]?[0-9]+)?)"
+    curr_prefix = r"(?:[\$€£¥₹]|USD|USDT|USDC)?"
+    time_lookahead = r"(?!\s*(?:am|pm|utc|est|edt|cst|cdt|pst|pdt|gmt|et|pt\b|:\d{2}))"
+
+    # Priority 1: Comparison operator or directional phrase + optional currency + number + optional multiplier
+    # Ensures candidate number is NOT part of a time expression (e.g. 5 PM, 12:00 PM)
+    op_match = re.search(
+        r"(?:(?:>=|<=|>|<|&gt;=|&lt;=|&gt;|&lt;|≥|≤)\s*|(?:above|below|over|under|exceed(?:s|ed)?|surpass(?:es|ed)?|greater than|less than|higher than|lower than|reach(?:es|ed)?|hit(?:s)?|touch(?:es|ed)?|(?:drop|fall|dip|rise|climb|settle|close|finish|end)(?:s|ped|ed)?\s+(?:to|at|below|above|under|over))(?::\s*|-\s*|\s+))\s*"
+        + curr_prefix + r"\s*" + num_pat + r"\s*([kmbtKMBT])?(?![a-zA-Z0-9])" + time_lookahead,
+        cleaned,
+        re.IGNORECASE,
+    )
+    if op_match:
+        res = _parse_candidate(op_match.group(1), op_match.group(2))
+        if res is not None:
+            return res
+
+    # Priority 2: Currency symbol prefix ($58,010 or €58,010 or £2,450.50 or $0.125 or $95k)
+    curr_match = re.search(
+        r"[\$€£¥₹]\s*" + num_pat + r"\s*([kmbtKMBT])?(?![a-zA-Z0-9])" + time_lookahead,
+        cleaned,
+        re.IGNORECASE,
+    )
+    if curr_match:
+        res = _parse_candidate(curr_match.group(1), curr_match.group(2))
+        if res is not None:
+            return res
+
+    # Priority 3: Trailing currency ticker suffix (58,010 USD / 58010USDT)
+    suffix_match = re.search(
+        num_pat + r"\s*([kmbtKMBT])?\s*(?:USD|USDT|USDC)(?![a-zA-Z0-9])" + time_lookahead,
+        cleaned,
+        re.IGNORECASE,
+    )
+    if suffix_match:
+        res = _parse_candidate(suffix_match.group(1), suffix_match.group(2))
+        if res is not None:
+            return res
+
+    return None
+
+
+def get_market_strike_price(market_or_opp: Any) -> Optional[float]:
+    """Extracts strike price from a market object, opportunity, round, or question string."""
+    if market_or_opp is None:
+        return None
+    if isinstance(market_or_opp, (int, float)):
+        val = float(market_or_opp)
+        return val if math.isfinite(val) and val > 0 else None
+    if isinstance(market_or_opp, str):
+        return extract_strike_price(market_or_opp)
+
+    def _get_val(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    strike = (
+        _get_val(market_or_opp, "strike_price")
+        or _get_val(market_or_opp, "strike")
+        or _get_val(market_or_opp, "strikePrice")
+    )
+    if strike is not None:
+        try:
+            val = float(strike)
+            if math.isfinite(val) and val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    for key in (
+        "question",
+        "title",
+        "slug",
+        "groupItemTitle",
+        "group_item_title",
+        "subtitle",
+        "description",
+    ):
+        text_val = _get_val(market_or_opp, key)
+        if text_val:
+            parsed = extract_strike_price(str(text_val))
+            if parsed is not None:
+                return parsed
+
+    return None
+
+
 @dataclass(frozen=True)
 class CryptoRound:
     """A validated live 5-minute Up/Down round for one approved asset."""
@@ -194,6 +336,7 @@ class CryptoRound:
     side_prices: Dict[str, Optional[float]]
     volume: float
     liquidity: float
+    strike_price: Optional[float] = None
 
     @property
     def round_key(self) -> str:
@@ -560,6 +703,7 @@ def classify_market(
     metrics = getattr(market, "metrics", None)
     volume = float(getattr(metrics, "volume", None) or 0.0) if metrics else 0.0
     liquidity = float(getattr(metrics, "liquidity", None) or 0.0) if metrics else 0.0
+    strike_price = extract_strike_price(question)
 
     return CryptoRound(
         asset=asset,
@@ -574,6 +718,7 @@ def classify_market(
         side_prices=side_prices,
         volume=volume,
         liquidity=liquidity,
+        strike_price=strike_price,
     )
 
 

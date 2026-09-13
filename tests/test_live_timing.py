@@ -428,3 +428,7 @@ def test_require_clock_can_be_relaxed_for_one_sport():
                        late_game_sport_rules={"cs2": {"require_clock": False,
                                                       "max_remaining_fraction": 0}})
     assert evaluate_event_timing(event, relaxed).eligible
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__]))
