@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -29,20 +29,30 @@ def get_credentials() -> Tuple[str, str]:
     return token, chat_id
 
 
+def get_chat_ids() -> List[str]:
+    """Returns all configured chat IDs. Supports comma-separated list of user & group IDs."""
+    _, raw = get_credentials()
+    if not raw:
+        return []
+    return [cid.strip() for cid in raw.replace(";", ",").split(",") if cid.strip()]
+
+
 def is_configured() -> bool:
-    """Returns True if both bot token and chat ID are present."""
-    token, chat_id = get_credentials()
-    return bool(token and chat_id)
+    """Returns True if both bot token and at least one chat ID are present."""
+    token, _ = get_credentials()
+    chat_ids = get_chat_ids()
+    return bool(token and chat_ids)
 
 
 def test_connection() -> Tuple[bool, str]:
     """Validates the bot token via Telegram getMe API.
     Returns (success, bot_username_or_error_message).
     """
-    token, chat_id = get_credentials()
+    token, _ = get_credentials()
+    chat_ids = get_chat_ids()
     if not token:
         return False, "TELEGRAM_BOT_TOKEN is not configured."
-    if not chat_id:
+    if not chat_ids:
         return False, "TELEGRAM_CHAT_ID is not configured."
 
     url = f"{TELEGRAM_API_URL}/bot{token}/getMe"
@@ -58,32 +68,36 @@ def test_connection() -> Tuple[bool, str]:
 
 
 def send_message(text: str, parse_mode: str = "HTML") -> bool:
-    """Sends a message synchronously to the configured Telegram chat.
+    """Sends a message synchronously to all configured Telegram chats/groups.
     Catches all exceptions to prevent breaking the caller.
     """
-    token, chat_id = get_credentials()
-    if not token or not chat_id:
+    token, _ = get_credentials()
+    chat_ids = get_chat_ids()
+    if not token or not chat_ids:
         logger.debug("[Telegram] Token or Chat ID not configured. Skipping alert.")
         return False
 
     url = f"{TELEGRAM_API_URL}/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
-    }
+    any_success = False
 
-    try:
-        resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-        data = resp.json()
-        if not data.get("ok"):
-            logger.warning(f"[Telegram] Failed to send message: {data.get('description')}")
-            return False
-        return True
-    except Exception as exc:
-        logger.warning(f"[Telegram] Error sending message: {exc}")
-        return False
+    for cid in chat_ids:
+        payload = {
+            "chat_id": cid,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+            data = resp.json()
+            if data.get("ok"):
+                any_success = True
+            else:
+                logger.warning(f"[Telegram] Failed to send message to {cid}: {data.get('description')}")
+        except Exception as exc:
+            logger.warning(f"[Telegram] Error sending message to {cid}: {exc}")
+
+    return any_success
 
 
 def send_message_async(text: str, parse_mode: str = "HTML") -> None:
@@ -255,8 +269,9 @@ def notify_trade_exit(trade: Dict[str, Any], async_send: bool = True) -> None:
 
 def send_test_notification() -> Tuple[bool, str]:
     """Sends a sample test alert to confirm end-to-end delivery."""
-    token, chat_id = get_credentials()
-    if not token or not chat_id:
+    token, _ = get_credentials()
+    chat_ids = get_chat_ids()
+    if not token or not chat_ids:
         return False, "Bot token or Chat ID is missing."
 
     test_msg = (
@@ -268,5 +283,5 @@ def send_test_notification() -> Tuple[bool, str]:
     )
     success = send_message(test_msg)
     if success:
-        return True, "Test message sent successfully! Check your Telegram app."
+        return True, f"Test alert delivered successfully to {len(chat_ids)} recipient(s)/group(s)!"
     return False, "Failed to send message. Please verify your Bot Token and Chat ID."

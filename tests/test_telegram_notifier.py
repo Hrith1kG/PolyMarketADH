@@ -44,6 +44,19 @@ def test_send_message_failure_handles_gracefully(mock_post):
         assert result is False
 
 
+@patch("telegram_notifier.requests.post")
+def test_send_message_multiple_chats(mock_post):
+    mock_post.return_value.json.return_value = {"ok": True}
+    with patch("telegram_notifier.get_credentials", return_value=("token123", "431736948, -1003964142758")):
+        result = telegram_notifier.send_message("Multi broadcast")
+        assert result is True
+        assert mock_post.call_count == 2
+        calls = [call[1]["json"]["chat_id"] for call in mock_post.call_args_list]
+        assert "431736948" in calls
+        assert "-1003964142758" in calls
+
+
+
 @patch("telegram_notifier.send_message")
 def test_notify_trade_entry(mock_send):
     with patch("telegram_notifier.is_configured", return_value=True):
