@@ -54,6 +54,10 @@ FUNDER_ADDRESS = os.getenv("FUNDER_ADDRESS") or os.getenv("POLYMARKET_FUNDER_ADD
 RELAYER_API_KEY = os.getenv("RELAYER_API_KEY") or os.getenv("POLYMARKET_RELAYER_API_KEY", "")
 RELAYER_API_KEY_ADDRESS = os.getenv("RELAYER_API_KEY_ADDRESS") or os.getenv("POLYMARKET_RELAYER_API_KEY_ADDRESS", "")
 
+# --- Telegram Notifications ---
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 # Single canonical fallback account label. Used whenever a trade/position is recorded
@@ -236,5 +240,13 @@ def set_account_relayer(account_id: str, relayer_api_key: str, relayer_api_key_a
     lines = _read_env_lines(path)
     lines = _set_env_var(lines, f"ACCOUNT_{account_id}_RELAYER_API_KEY", (relayer_api_key or "").strip())
     lines = _set_env_var(lines, f"ACCOUNT_{account_id}_RELAYER_API_KEY_ADDRESS", (relayer_api_key_address or "").strip())
+    _write_env_lines(lines, path)
+
+
+def set_telegram_credentials(bot_token: str, chat_id: str, path: str = None) -> None:
+    """Updates Telegram bot token and chat ID in .env so they persist across restarts."""
+    lines = _read_env_lines(path)
+    lines = _set_env_var(lines, "TELEGRAM_BOT_TOKEN", (bot_token or "").strip())
+    lines = _set_env_var(lines, "TELEGRAM_CHAT_ID", (chat_id or "").strip())
     _write_env_lines(lines, path)
 

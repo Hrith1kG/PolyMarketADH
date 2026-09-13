@@ -680,8 +680,8 @@ with st.sidebar:
     # instead of one long scroll, while still saving together as a single config. ---
     with st.form("sidebar_config_form"):
         st.markdown('<div style="font-family:\'Space Grotesk\',sans-serif;font-weight:700;font-size:0.95rem;color:#E7ECF3;margin-bottom:2px;">⚙️ Strategy Configuration</div>', unsafe_allow_html=True)
-        sb_tab_general, sb_tab_gates, sb_tab_risk, sb_tab_crypto, sb_tab_wallet = st.tabs(
-            ["General", "Gates", "Risk", "Crypto 5m", "Wallet"]
+        sb_tab_general, sb_tab_gates, sb_tab_risk, sb_tab_crypto, sb_tab_wallet, sb_tab_telegram = st.tabs(
+            ["General", "Gates", "Risk", "Crypto 5m", "Wallet", "Telegram"]
         )
 
         with sb_tab_general:
@@ -1034,9 +1034,52 @@ with st.sidebar:
                 help="Enter any Polymarket profile or proxy wallet address to track on-chain activity, trades, and PnL.",
             )
 
+        with sb_tab_telegram:
+            st.markdown("**📢 Telegram Trade Alerts**")
+            tg_enabled = st.checkbox(
+                "Enable Telegram Alerts",
+                value=bool(settings.get("telegram_notifications_enabled", True)),
+                help="Master switch for Telegram alerts.",
+            )
+            tg_entries = st.checkbox(
+                "Alert on Trade Entry",
+                value=bool(settings.get("telegram_notify_entries", True)),
+                help="Push notification whenever a trade is entered/bought.",
+            )
+            tg_exits = st.checkbox(
+                "Alert on Exit & PnL",
+                value=bool(settings.get("telegram_notify_exits", True)),
+                help="Push notification whenever a position closes or settles.",
+            )
+            tg_paper = st.checkbox(
+                "Alert on Paper Trades",
+                value=bool(settings.get("telegram_notify_paper", True)),
+                help="Include simulated PAPER trades in alerts.",
+            )
+            st.divider()
+            tg_token = st.text_input(
+                "Bot Token",
+                value=config.TELEGRAM_BOT_TOKEN,
+                type="password",
+                placeholder="123456789:ABCdefGhI...",
+                help="Obtained from @BotFather on Telegram",
+            )
+            tg_chat = st.text_input(
+                "Chat ID",
+                value=config.TELEGRAM_CHAT_ID,
+                placeholder="e.g. 123456789",
+                help="Your numeric chat ID from @userinfobot",
+            )
+
         st.write("")
         saved = st.form_submit_button("💾 Save & Apply Config", width="stretch", type="primary")
         if saved:
+            # Update Telegram credentials if changed
+            if (tg_token != config.TELEGRAM_BOT_TOKEN) or (tg_chat != config.TELEGRAM_CHAT_ID):
+                config.set_telegram_credentials(tg_token, tg_chat)
+                config.TELEGRAM_BOT_TOKEN = tg_token.strip()
+                config.TELEGRAM_CHAT_ID = tg_chat.strip()
+
             updated_settings = {
                 "sports_enabled": sports_enabled,
                 "bot_status": "PAUSED" if sports_paused else "RUNNING",
@@ -1065,6 +1108,11 @@ with st.sidebar:
                 "max_signals_per_scan": max_signals,
                 "only_sports": only_sports,
                 "sports_market_types": ["moneyline"] if only_moneyline else [],
+                # Telegram Notification Settings
+                "telegram_notifications_enabled": tg_enabled,
+                "telegram_notify_entries": tg_entries,
+                "telegram_notify_exits": tg_exits,
+                "telegram_notify_paper": tg_paper,
                 # Crypto 5-Minute strategy -- namespaced so it can never collide
                 # with the sports keys above.
                 "crypto_enabled": crypto_enabled,
@@ -1737,7 +1785,27 @@ with tab_control:
             {"Setting": "Max Open Positions", "Value": str(int(settings.get("max_open_positions", 10)))},
             {"Setting": "Max Trades / Day", "Value": str(int(settings.get("max_trades_per_day", 10)))},
         ]
-        st.dataframe(pd.DataFrame(limits_data), hide_index=True, width="stretch")
+    st.write("")
+    st.markdown("##### Telegram Notification Status")
+    with st.container(border=True):
+        import telegram_notifier
+        tg_ready = telegram_notifier.is_configured()
+        tg_col_stat, tg_col_btn = st.columns([1.5, 1])
+        with tg_col_stat:
+            if tg_ready:
+                st.markdown("🟢 **Telegram Bot:** Configured & Active")
+                masked_token = f"...{config.TELEGRAM_BOT_TOKEN[-6:]}" if len(config.TELEGRAM_BOT_TOKEN) > 6 else "***"
+                st.caption(f"Chat ID: `{config.TELEGRAM_CHAT_ID}` • Bot Token: `{masked_token}`")
+            else:
+                st.markdown("⚠️ **Telegram Bot:** Not Configured")
+                st.caption("Configure Bot Token & Chat ID in the sidebar **Telegram** tab or in `.env`.")
+        with tg_col_btn:
+            if st.button(":material/send: Send Test Alert", key="btn_tg_test_alert", disabled=not tg_ready, width="stretch"):
+                success, res_msg = telegram_notifier.send_test_notification()
+                if success:
+                    st.success(res_msg)
+                else:
+                    st.error(res_msg)
 
     st.write("")
     st.markdown("##### Full Circuit Breaker and Risk Gate Table")

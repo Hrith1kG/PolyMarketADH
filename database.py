@@ -194,6 +194,16 @@ def settle_trade(
 ) -> bool:
     init_db(db_path)
     with get_connection(db_path) as conn:
+        trade_record = None
+        if trade_id:
+            row = conn.execute("SELECT * FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+            if row:
+                trade_record = dict(row)
+        else:
+            row = conn.execute("SELECT * FROM trades WHERE token_id = ? AND result = 'PENDING'", (token_id,)).fetchone()
+            if row:
+                trade_record = dict(row)
+
         if trade_id:
             cursor = conn.execute("""
                 UPDATE trades
@@ -217,6 +227,22 @@ def settle_trade(
                 WHERE token_id = ? AND result = 'PENDING'
             """, (resolved_price, payout, pnl, result, closed_at, note, token_id))
         conn.commit()
+
+        if cursor.rowcount > 0 and trade_record:
+            trade_record.update({
+                "resolved_price": resolved_price,
+                "payout": payout,
+                "pnl": pnl,
+                "result": result,
+                "closed_at": closed_at,
+                "note": note,
+            })
+            try:
+                import telegram_notifier
+                telegram_notifier.notify_trade_exit(trade_record)
+            except Exception:
+                pass
+
         return cursor.rowcount > 0
 
 

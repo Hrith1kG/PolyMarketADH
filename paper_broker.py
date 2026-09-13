@@ -592,6 +592,27 @@ class PaperBroker:
         })
 
         self.add_log(f"OPENED [{mode.upper()}][{account_name}]: {opp.question[:45]} [{opp.outcome_label}] {shares:.2f} shares @ {entry_price:.4f} cost=${stake:.2f}")
+
+        try:
+            import telegram_notifier
+            telegram_notifier.notify_trade_entry({
+                "trade_id": trade_id,
+                "placed_at": opened_at,
+                "market_id": position["market_id"],
+                "token_id": position["token_id"],
+                "slug": slug_val,
+                "question": position["question"],
+                "outcome": position["outcome_label"],
+                "entry_price": position["entry_price"],
+                "tokens": position["shares"],
+                "cost": position["stake"],
+                "time_left": time_left_str,
+                "mode": mode,
+                "account_name": account_name,
+            })
+        except Exception as exc:
+            logger.debug(f"Telegram entry alert error: {exc}")
+
         return position, ""
 
     def _close_position(self, pos_key: str, resolved_price: float, note: str) -> Dict[str, Any]:
