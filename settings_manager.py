@@ -24,6 +24,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_signals_per_scan": 5,
     "poll_interval_seconds": 60,
     # Category & Market Filters
+    "sports_enabled": True,
     "only_sports": True,
     "sports_market_types": ["moneyline"],
     "sports_tag_id": 100639,

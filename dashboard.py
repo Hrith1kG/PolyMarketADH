@@ -685,6 +685,37 @@ with st.sidebar:
         )
 
         with sb_tab_general:
+            st.markdown("**Master Strategy Switches**")
+            sports_enabled = st.checkbox(
+                "Enable Sports Strategy",
+                value=bool(settings.get("sports_enabled", True)),
+                help="Master switch to enable or disable the Sports betting strategy."
+            )
+            crypto_enabled = st.checkbox(
+                "Enable Crypto 5-Minute Strategy",
+                value=bool(settings.get("crypto_enabled", False)),
+            )
+
+            st.divider()
+            st.markdown("**Pause & Kill Switches**")
+            sports_paused = st.checkbox(
+                "Pause Sports Strategy",
+                value=str(settings.get("bot_status", "RUNNING")).upper() == "PAUSED",
+            )
+            crypto_paused = st.checkbox(
+                "Pause Crypto Strategy",
+                value=str(settings.get("crypto_bot_status", "RUNNING")).upper() == "PAUSED",
+            )
+            sports_kill = st.checkbox(
+                "Sports Entry Kill Switch",
+                value=bool(settings.get("entry_kill_switch", False)),
+            )
+            crypto_kill = st.checkbox(
+                "Crypto Entry Kill Switch",
+                value=bool(settings.get("crypto_entry_kill_switch", False)),
+            )
+
+            st.divider()
             poll_interval = st.number_input(
                 "Cooldown (seconds)",
                 min_value=10,
@@ -874,20 +905,9 @@ with st.sidebar:
                 "side only when its executable ask clears the probability floor "
                 "inside the entry window. Independent of the Sports strategy."
             )
-            crypto_enabled = st.checkbox(
-                "Enable Crypto 5-Minute Strategy",
-                value=bool(settings.get("crypto_enabled", False)),
-            )
-            crypto_paused = st.checkbox(
-                "Pause Crypto Strategy",
-                value=str(settings.get("crypto_bot_status", "RUNNING")).upper() == "PAUSED",
-                help="Pauses crypto scanning only. The Sports loop keeps running.",
-            )
-            crypto_kill = st.checkbox(
-                "Crypto Entry Kill Switch",
-                value=bool(settings.get("crypto_entry_kill_switch", False)),
-                help="Blocks new crypto entries only.",
-            )
+            
+            st.markdown("*(Master & Pause toggles have been moved to the General tab)*")
+
             crypto_assets = st.multiselect(
                 "Approved Assets",
                 options=[a.symbol for a in crypto_markets.APPROVED_ASSETS],
@@ -1018,6 +1038,9 @@ with st.sidebar:
         saved = st.form_submit_button("💾 Save & Apply Config", width="stretch", type="primary")
         if saved:
             updated_settings = {
+                "sports_enabled": sports_enabled,
+                "bot_status": "PAUSED" if sports_paused else "RUNNING",
+                "entry_kill_switch": sports_kill,
                 "poll_interval_seconds": poll_interval,
                 "require_healthy_data": req_healthy,
                 "require_high_confidence": req_high_conf,

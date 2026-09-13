@@ -199,6 +199,15 @@ def run():
                     log(f"Error checking live positions for redemption: {e}")
 
             # 2. Check if paused (unless manual scan is triggered)
+            sports_enabled = settings.get("sports_enabled", True)
+            if not sports_enabled:
+                if not getattr(broker, "_sports_disabled_logged", False):
+                    log("Sports strategy is DISABLED via Dashboard. Skipping sports scan...")
+                    broker._sports_disabled_logged = True
+                time.sleep(poll_interval)
+                continue
+            broker._sports_disabled_logged = False
+
             if status == "PAUSED" and not manual_trigger:
                 log("Bot is PAUSED via Dashboard. Waiting for resume or manual trigger...")
                 time.sleep(min(5, poll_interval))
